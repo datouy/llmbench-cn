@@ -289,11 +289,6 @@ def cmd_list(args) -> str:
         lines.append("  ".join("-" * w for w in widths))
         for pid, p in providers.items():
             currency = p.get("currency", "CNY")
-            first = p["models"][0]
-            price = "—"
-            if first.get("input") is not None and first.get("output") is not None:
-                symbol = "$" if currency == "USD" else "¥"
-                price = "%s%.2f / %s%.2f" % (symbol, first["input"], symbol, first["output"])
             protocols = []
             if p.get("base_url"):
                 protocols.append("chat")
@@ -301,6 +296,16 @@ def cmd_list(args) -> str:
                 protocols.append("anthropic")
             if p.get("responses_api"):
                 protocols.append("responses")
+            if not p.get("models"):
+                lines.append("  ".join(pad(c, w) for c, w in zip(
+                    [pid, "(无内置模型)", "—", "/".join(protocols),
+                     "运行 refresh 导入网关 /models 或 -m 指定模型"], widths)))
+                continue
+            first = p["models"][0]
+            price = "—"
+            if first.get("input") is not None and first.get("output") is not None:
+                symbol = "$" if currency == "USD" else "¥"
+                price = "%s%.2f / %s%.2f" % (symbol, first["input"], symbol, first["output"])
             lines.append("  ".join(pad(c, w) for c, w in zip(
                 [pid, first["id"], price, "/".join(protocols), p.get("note", "")[:40]], widths)))
         lines.append("")
@@ -340,8 +345,11 @@ def parse_pairs(args) -> list:
             sys.exit(2)
         if i < len(models):
             model = models[i]
-        else:
+        elif providers_data[pid].get("models"):
             model = providers_data[pid]["models"][0]["id"]
+        else:
+            sys.stderr.write("供应商 %s 没有内置模型,请用 -m 指定模型名。\n" % pid)
+            sys.exit(2)
         pairs.append((pid, model, key_override))
     return pairs
 
@@ -350,8 +358,9 @@ def cmd_run(args) -> str:
     providers_data = load_json(DATA_FILE)["providers"]
     tasks_data = load_json(TASKS_FILE)["tasks"]
     if args.task:
-        tasks = [t for t in tasks_data if t["id"] in args.task]
-        missing = set(args.task) - {t["id"] for t in tasks_data}
+        task_ids = [x.strip() for chunk in args.task for x in chunk.split(",") if x.strip()]
+        tasks = [t for t in tasks_data if t["id"] in task_ids]
+        missing = set(task_ids) - {t["id"] for t in tasks_data}
         if missing:
             sys.stderr.write("未知任务：%s\n" % ", ".join(sorted(missing)))
             sys.exit(2)
@@ -402,8 +411,10 @@ def cmd_run(args) -> str:
         report = {"version": VERSION, "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                   "repeat": args.repeat, "rows": rows}
         if args.save:
-            Path(args.save).write_text(json.dumps(report, ensure_ascii=False, indent=2),
-                                       encoding="utf-8")
+            save_path = Path(args.save)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            save_path.write_text(json.dumps(report, ensure_ascii=False, indent=2),
+                                 encoding="utf-8")
         if args.json:
             return json.dumps(report, ensure_ascii=False, indent=2)
 
@@ -430,6 +441,62 @@ def cmd_run(args) -> str:
 # 入口
 # --------------------------------------------------------------------------
 
+def cmd_refresh(args) -> str:
+    """从 OpenAI 兼容网关的 /models 导入模型列表,写入数据文件。"""
+    data = load_json(DATA_FILE)
+    providers = data["providers"]
+    pid = args.provider or "gateway"
+    provider = providers.get(pid) or {"base_url": "", "env_key": ""}
+    base = (args.base_url or provider.get("base_url") or "http://127.0.0.1:8788/v1").rstrip("/")
+    key = args.key or os.environ.get(provider.get("env_key") or "") or ""
+    url = base + "/models"
+    headers = {"User-Agent": "llmbench-refresh"}
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    started = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            status = resp.status
+            raw = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as err:
+        status, raw = err.code, err.read().decode("utf-8", "replace")
+    except Exception as err:
+        return "刷新失败:无法连接 %s (%s)" % (url, err)
+    ms = int((time.time() - started) * 1000)
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return "刷新失败:响应不是合法 JSON\n%s" % raw[:300]
+    ids = [m.get("id") for m in parsed.get("data", []) if m.get("id")]
+    if not ids:
+        return "刷新失败:未在响应中找到模型列表 (HTTP %s, %sms)" % (status, ms)
+    if pid not in providers:
+        providers[pid] = {
+            "name": pid, "cn": "", "site": "", "base_url": base,
+            "anthropic_base_url": None, "responses_api": None,
+            "env_key": (pid.upper() + "_API_KEY"), "currency": "CNY",
+            "note": "由 llmbench refresh 从网关导入。", "models": [],
+        }
+    existing = {m["id"] for m in providers[pid].get("models", [])}
+    added = [i for i in ids if i not in existing]
+    removed = [i for i in existing if i not in ids]
+    providers[pid]["models"] = [
+        m for m in providers[pid]["models"] if m["id"] in ids
+    ] + [{"id": i, "input": None, "output": None, "cache_hit_input": None,
+          "context": None, "desc": "网关导入"} for i in added]
+    providers[pid]["models_refreshed_at"] = time.strftime("%Y-%m-%d %H:%M")
+    data["providers"] = providers
+    DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    lines = ["刷新完成:%s (%s) HTTP %s %sms" % (pid, base, status, ms),
+             "新增 %d 个模型,移除 %d 个,当前共 %d 个。" % (len(added), len(removed), len(ids))]
+    if added:
+        lines.append("新增:" + ", ".join(added))
+    if removed:
+        lines.append("移除:" + ", ".join(removed))
+    lines.append("已写入 %s" % DATA_FILE)
+    return "\n".join(lines)
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="llmbench",
@@ -454,6 +521,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--json", action="store_true", help="输出 JSON 报告")
     p_run.add_argument("--save", help="保存 JSON 报告到文件")
     p_run.add_argument("--verbose", "-v", action="store_true", help="打印每次运行的明细")
+
+    p_refresh = sub.add_parser("refresh", help="从网关 /models 导入模型列表（更新数据文件）")
+    p_refresh.add_argument("--provider", "-p", default="gateway", help="供应商 id（缺省 gateway）")
+    p_refresh.add_argument("--base-url", help="网关地址（缺省用该供应商的 base_url）")
+    p_refresh.add_argument("--key", "-k", help="API Key（缺省读环境变量）")
     return parser
 
 
@@ -468,6 +540,8 @@ def main(argv: list | None = None) -> int:
             print(cmd_list(args))
         elif args.command == "run":
             print(cmd_run(args))
+        elif args.command == "refresh":
+            print(cmd_refresh(args))
         return 0
     except KeyboardInterrupt:
         print("\n已取消")
@@ -476,4 +550,10 @@ def main(argv: list | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+
+
+
+
 

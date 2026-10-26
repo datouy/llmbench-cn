@@ -7,6 +7,7 @@
 
 [![Stars](https://img.shields.io/github/stars/datouy/llmbench-cn?style=social)](https://github.com/datouy/llmbench-cn)
 [![License](https://img.shields.io/badge/license-MIT-orange)](https://github.com/datouy/llmbench-cn/blob/main/LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/datouy/llmbench-cn/ci.yml?branch=main)](https://github.com/datouy/llmbench-cn/actions)
 ![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)
 ![Version](https://img.shields.io/badge/version-0.1.0-brightgreen)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-success)
@@ -32,34 +33,34 @@ Once you've picked a winner with llmbench-cn, use **[aicn](https://github.com/da
 
 Published leaderboards measure *someone else's network and tasks*. For picking a model, one minute of self-testing beats a hundred reviews.
 
-**llmbench-cn** 用你自己的密钥、自己的网络,实测 DeepSeek / Kimi / GLM / Qwen / 豆包 / SiliconFlow 等模型的**首 token 延迟、总时延、token 量、成本与客观任务通过率**。零依赖、单文件 Python。
+**llmbench-cn** 用你自己的密钥、自己的网络,实测 DeepSeek / Kimi / GLM / Qwen / 豆包 / SiliconFlow 以及任意 OpenAI 兼容网关的**首 token 延迟、总时延、token 量、成本与客观任务通过率**。零依赖、单文件包。
 
-**llmbench-cn** benchmarks Chinese LLMs with *your* keys and *your* network — first-token latency, total latency, token usage, cost and objective task pass-rate. Zero dependencies, single Python file.
-
-## 🎯 为什么做 · Why
-
-- 🏆 **排行榜 ≠ 你的情况**:`chinese-llm-benchmark` 是别人发布的结果数据仓库,`llmBench` 只测本地 Ollama;没有工具让你用自己的密钥做买前实测;Leaderboards aren't you — no tool let you self-test cloud providers with your own keys;
-- 📏 **客观指标缺失**:首 token 延迟、总时延、按官方价格折算的成本,直接决定 Agent 体验和账单;Objective metrics — first-token latency, total time, cost — decide your experience and your bill;
-- ✅ **任务可验证**:内置任务带客观校验(代码真的会跑、JSON 真的会解析);Built-in tasks are objectively verified — code actually runs, JSON actually parses.
+**llmbench-cn** benchmarks Chinese LLMs — or any OpenAI-compatible gateway — with *your* keys and *your* network: first-token latency, total latency, token usage, cost and objective task pass-rate. Zero dependencies.
 
 ## 🚀 快速开始 · Quick Start
 
 ```bash
-git clone https://github.com/datouy/llmbench-cn.git
-cd llmbench-cn
+# 方式一:pip 安装 / Install
+git clone https://github.com/datouy/llmbench-cn.git && cd llmbench-cn
+pip install .          # 之后直接用 llmbench 命令
 
-python llmbench.py list                          # 看供应商与任务 / providers & tasks
-python llmbench.py list --tasks
+# 方式二:免安装 / No install (Python >= 3.9)
+python -m llmbench list                          # 看供应商与任务 / providers & tasks
+python -m llmbench list --tasks
 
-# 单模型实测（密钥走环境变量或内联） / single model
-python llmbench.py run -p deepseek -m deepseek-chat
-python llmbench.py run -p deepseek:sk-xxx -m deepseek-chat -t code-fib -n 3
+# 单模型实测(密钥走环境变量或内联) / single model
+python -m llmbench run -p deepseek -m deepseek-chat
+python -m llmbench run -p deepseek:sk-xxx -m deepseek-chat -t code-fib -n 3
 
-# 多模型对比（按顺序配对 -p 与 -m） / multi-model showdown
-python llmbench.py run -p deepseek -m deepseek-chat -p qwen -m qwen-plus -t code-fib,math
+# 多模型对比(按顺序配对 -p 与 -m) / multi-model showdown
+python -m llmbench run -p deepseek -m deepseek-chat -p qwen -m qwen-plus -t code-fib,math
+
+# 任意 OpenAI 兼容网关(one-api / new-api / WorkBuddy2API-Hub…)
+python -m llmbench run -p gateway:网关Key -m 模型名 --base-url http://你的网关/v1
+python -m llmbench refresh --base-url http://你的网关/v1 -k 网关Key   # 一键导入网关全部模型
 
 # 导出报告 / export report
-python llmbench.py run -p qwen -m qwen-plus --json --save report.json
+python -m llmbench run -p qwen -m qwen-plus --json --save report.json
 ```
 
 ## 📊 输出示例 · Sample Output
@@ -70,6 +71,20 @@ python llmbench.py run -p qwen -m qwen-plus --json --save report.json
 deepseek    deepseek-chat    code-fib   3/3   412          2.3        89/128      ¥0.0007   3/3
 qwen        qwen-plus        code-fib   3/3   356          1.9        91/130      ¥0.0003   3/3
 ```
+
+### 真实网关实测 · Real-world run
+
+2026-10-26 对 WorkBuddy2API-Hub 网关(19 个模型)实测,7 模型 × 3 任务全部通过客观校验(节选):
+
+| 模型 | 首token(ms) | 总时延(s) | 通过率 |
+|---|---|---|---|
+| glm-5.3-flash | 1440–1955 | 1.4–2.0 | 3/3 |
+| minimax-m3 | 1306–2345 | 1.3–2.3 | 3/3 |
+| deepseek-v4.1-flash | 1583–2171 | 1.6–2.2 | 3/3 |
+| glm-5.3 | 1638–3846 | 1.6–3.8 | 3/3 |
+| deepseek-v4-pro | 2468–4491 | 2.5–4.5 | 3/3 |
+| step-5-preview | 3357–4915 | 3.4–5.4 | 3/3 |
+| kimi-k3-1 | 3988–14857 | 4.0–14.9 | 3/3 |
 
 - **首 token(ms)** 流式响应第一个字出现的延迟 / time to first token;
 - **总时延(s)** 完整回答耗时 / total latency;
@@ -87,14 +102,15 @@ qwen        qwen-plus        code-fib   3/3   356          1.9        91/130    
 | `sql` | - | SQL 编写(仅测指标) |
 | `zh-summary` | - | 中文摘要(检验中文输出成本) |
 
-任务定义在 `data/tasks.json`,改 JSON 即可扩展,欢迎 PR。Tasks live in `data/tasks.json` — extend without touching code.
+任务定义在 `llmbench/data/tasks.json`,改 JSON 即可扩展,欢迎 PR。Tasks live in `llmbench/data/tasks.json` — extend without touching code.
 
 ## 🧰 命令一览 · Commands
 
 | 命令 / Command | 说明 / What it does |
 |---|---|
 | `llmbench list [--tasks] [--json]` | 查看供应商/模型/任务 / providers & tasks |
-| `llmbench run -p 供应商[:密钥] -m 模型 [-t 任务] [-n 次数] [--json] [--save 文件] [-v]` | 运行实测 / run benchmarks |
+| `llmbench run -p 供应商[:密钥] -m 模型 [-t 任务] [-n 次数] [--base-url 网关] [--json] [--save 文件] [-v]` | 运行实测 / run benchmarks |
+| `llmbench refresh [-p gateway] [--base-url 网关] [-k 密钥]` | 从网关 `/models` 导入模型列表,写入数据文件 / import gateway models |
 
 密钥读取顺序:内联 `-p deepseek:sk-xxx` → 环境变量 `DEEPSEEK_API_KEY`。Key resolution: inline first, then env var.
 
@@ -107,6 +123,7 @@ qwen        qwen-plus        code-fib   3/3   356          1.9        91/130    
 ## 📑 数据说明 · Data
 
 - 供应商数据与姊妹项目 [aicn](https://github.com/datouy/aicn) 同源,价格更新于 2026-10,以官方定价页为准;
+- 数据超过 3 个月未更新时,CI 工作流会自动开 Issue 提醒(每周一检查);
 - 单次采样有波动,建议 `-n 3` 取中位数。Run `-n 3` for stable medians.
 
 ## 🗺️ 路线图 · Roadmap
@@ -116,16 +133,19 @@ qwen        qwen-plus        code-fib   3/3   356          1.9        91/130    
 - [ ] 本地历史趋势存储(SQLite)
 - [ ] 质量互评模式(模型 A 判模型 B 的输出)
 - [ ] 导出 Markdown 对比报告
+- [ ] PyPI 发布
 
 ## 📁 项目结构 · Structure
 
 ```
 llmbench-cn/
-├── llmbench.py           # 单文件 CLI（零依赖）
-├── data/providers.json   # 供应商/价格数据
-├── data/tasks.json       # 内置任务（可扩展）
-├── tests/test_llmbench.py
-└── docs/蓝海验证.md       # 立项依据：GitHub 竞品搜索证据
+├── llmbench/
+│   ├── cli.py           # CLI 主程序(零依赖)
+│   └── data/            # providers.json / tasks.json
+├── tests/               # 单元测试 + mock 网关端到端测试
+├── scripts/             # 数据新鲜度检查(CI 用)
+├── pyproject.toml       # pip 安装入口
+└── docs/蓝海验证.md      # 立项依据:GitHub 竞品搜索证据
 ```
 
 ## 📄 License

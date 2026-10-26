@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmbench-cn"
+version = "0.1.0"
+description = "国产大模型自测选型 CLI:速度 / 成本 / 客观任务通过率(零依赖)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [{name = "datouy"}]
+keywords = ["llm", "benchmark", "deepseek", "qwen", "glm", "kimi", "cli", "chinese"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Testing",
+]
+
+[project.scripts]
+llmbench = "llmbench.cli:main"
+
+[tool.setuptools]
+packages = ["llmbench"]
+
+[tool.setuptools.package-data]
+llmbench = ["data/*.json"]

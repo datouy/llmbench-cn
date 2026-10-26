@@ -1,0 +1,21 @@
+name: data-freshness
+
+on:
+  schedule:
+    - cron: "30 2 * * 1"  # 每周一 02:30 UTC
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 检查数据新鲜度
+        run: python scripts/check_freshness.py
+        env:
+          GH_TOKEN: ${{ github.token }}
