@@ -43,6 +43,7 @@ th,td{border:1px solid var(--line);padding:6px 8px;text-align:left}th{color:var(
 .taskgrid input{width:auto}
 .hint{color:var(--dim);font-size:12px;margin-top:8px}
 .prow{display:flex;gap:8px;margin-top:10px}.prow>*{flex:1}.prow .del{flex:0 0 auto;background:#2d1517;border-color:#5c2d30;color:#f0a8a8}
+.hidden{display:none}
 </style></head><body>
 <h1>llmbench-cn <span style="color:var(--acc)">Web 面板</span></h1>
 <div class="sub">国产大模型自测选型:首 token 延迟 / 成本 / 客观任务通过率 · 零依赖 · 端口 __PORT__ · 姊妹项目:<a href="__AICN_URL__" target="_blank">aicn 面板</a></div>
@@ -64,17 +65,19 @@ th,td{border:1px solid var(--line);padding:6px 8px;text-align:left}th{color:var(
 <div class="hint">密钥只进入本次请求内存,面板不保存、不落盘。真实网关限流(429)时请减少重复次数或换模型。</div>
 </div>
 <div class="card">
-<h2>② 供应商 / 任务清单</h2>
-<button class="primary" onclick="loadList()">加载清单</button>
-<div id="list-box"></div>
+<h2>② 同步模型(/models)</h2>
+<label>供应商</label><select id="f-provider"></select>
+<label>覆盖 base_url(可选)</label><input id="f-base" placeholder="留空用该供应商默认地址">
+<label>API Key(可选,缺省读环境变量)</label><input id="f-key" type="password">
+<button class="primary" onclick="runRefresh()">拉取 /models 并更新数据文件</button>
+<button class="okbtn" onclick="fillSyncMock()">填入本地 mock 网关</button>
+<div id="refresh-out"></div>
+<div class="hint">大厂上新后在这里一键同步模型列表;原价格信息按 id 保留,写入前自动备份 .bak。</div>
 </div>
 <div class="card">
-<h2>③ 从网关导入模型 refresh</h2>
-<label>供应商 id</label><input id="f-provider" value="gateway">
-<label>网关地址</label><input id="f-base" placeholder="如 http://106.55.225.14/v1">
-<label>API Key(可选)</label><input id="f-key" type="password">
-<button class="primary" onclick="runRefresh()">导入 /models 到数据文件</button>
-<div id="refresh-out"></div>
+<h2>③ 供应商 / 任务清单</h2>
+<button class="primary" onclick="loadList()">加载清单</button>
+<div id="list-box"></div>
 </div>
 </div>
 <script>
@@ -83,12 +86,34 @@ async function api(path,body){const r=await fetch('/api/'+path,{method:body?'POS
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function render(el,obj){const pre=document.createElement('pre');let t='';if(obj.error)t+='错误: '+obj.error+'\n';if(obj.exit&&obj.exit!==0)t+='[退出码 '+obj.exit+']\n';if(obj.note)t+=obj.note+'\n';pre.textContent=t+(obj.out||'(无输出)');el.innerHTML='';el.appendChild(pre)}
 let PROV={},TASKS=[];
-async function init(){const r=await api('providers');PROV=r.providers||{};TASKS=r.tasks||[];const tg=$('tasks');tg.innerHTML='';TASKS.forEach(t=>{tg.innerHTML+='<label><input type="checkbox" class="tck" value="'+esc(t.id)+'" checked>'+esc(t.id)+' <span style="color:var(--dim)">'+esc(t.name)+'</span></label>'});addRow()}
-function provSelect(v){let h='<select class="psel">';Object.keys(PROV).forEach(p=>{h+='<option value="'+esc(p)+'"'+(p===v?' selected':'')+'>'+esc(p)+'</option>'});h+='</select>';return h}
-function addRow(v){const d=document.createElement('div');d.className='prow';d.innerHTML=provSelect(v||'gateway')+'<input class="pmodel" placeholder="模型(留空用默认)">'+'<input class="pkey" type="password" placeholder="API Key(可选)">'+'<button class="del" onclick="this.parentNode.remove()">✕</button>';$('prows').appendChild(d)}
-function rowData(d){return {provider:d.querySelector('.psel').value,model:d.querySelector('.pmodel').value,key:d.querySelector('.pkey').value}}
-function fillMock(){const rows=[...document.querySelectorAll('.prow')];rows.slice(1).forEach(r=>r.remove());const d=rows[0];d.querySelector('.psel').value='gateway';d.querySelector('.pmodel').value='mock-model';d.querySelector('.pkey').value='mock-key';$('r-base').value='http://127.0.0.1:8799/v1';$('r-repeat').value='2'}
-async function runBench(){const rows=[...document.querySelectorAll('.prow')].map(rowData);const tasks=[...document.querySelectorAll('.tck:checked')].map(x=>x.value);if(!rows.length||!rows[0].provider){alert('请先添加至少一个供应商');return}
+function providerOptions(){const cats={};Object.keys(PROV).forEach(p=>{const c=PROV[p].category||'其他';(cats[c]=cats[c]||[]).push(p)});
+const order=['国产直连','聚合平台','海外官方','自建网关','其他'];let h='';
+order.filter(c=>cats[c]).forEach(c=>{h+='<optgroup label="'+esc(c)+'">'+cats[c].map(p=>'<option value="'+esc(p)+'">'+esc(PROV[p].cn||PROV[p].name||p)+'('+esc(p)+')</option>').join('')+'</optgroup>'});return h}
+function modelOptions(pid){const p=PROV[pid]||{};const ms=p.models||[];let h='<option value="">(默认第一个)</option>';
+if(ms.length){const fams={};ms.forEach(m=>{const fam=(String(m.id).split(/[-\/.]/)[0]||'other').toUpperCase();(fams[fam]=fams[fam]||[]).push(m)});
+const keys=Object.keys(fams);
+if(keys.length>1){keys.forEach(f=>{h+='<optgroup label="'+esc(f)+'">'+fams[f].map(m=>'<option value="'+esc(m.id)+'">'+esc(m.id)+(m.input!=null?(' · ¥'+m.input):'')+'</option>').join('')+'</optgroup>'})}
+else{ms.forEach(m=>{h+='<option value="'+esc(m.id)+'">'+esc(m.id)+(m.input!=null?(' · ¥'+m.input):'')+'</option>'})}}
+h+='<option value="__custom__">✏️ 自定义…</option>';return h}
+function addRow(){const d=document.createElement('div');d.className='prow';
+d.innerHTML='<select class="psel">'+providerOptions()+'</select><select class="pmsel"></select><input class="pmodel hidden" placeholder="输入模型名"><input class="pkey" type="password" placeholder="API Key(可选)"><button class="del" onclick="this.parentNode.remove()">✕</button>';
+const sel=d.querySelector('.psel'),msel=d.querySelector('.pmsel'),min=d.querySelector('.pmodel');
+msel.innerHTML=modelOptions(sel.value);
+sel.addEventListener('change',()=>{msel.innerHTML=modelOptions(sel.value);min.classList.add('hidden')});
+msel.addEventListener('change',()=>{min.classList.toggle('hidden',msel.value!=='__custom__')});
+$('prows').appendChild(d)}
+function rowData(d){const msel=d.querySelector('.pmsel'),min=d.querySelector('.pmodel');
+return {provider:d.querySelector('.psel').value,model:msel.value==='__custom__'?(min.value||null):(msel.value||null),key:d.querySelector('.pkey').value}}
+function fillMock(){const rows=[...document.querySelectorAll('.prow')];rows.slice(1).forEach(r=>r.remove());
+const d=rows[0];d.querySelector('.psel').value='gateway';d.querySelector('.pmsel').innerHTML=modelOptions('gateway');
+d.querySelector('.pkey').value='mock-key';$('r-base').value='http://127.0.0.1:8799/v1';$('r-repeat').value='2'}
+function fillSyncMock(){$('f-provider').value='gateway';$('f-base').value='http://127.0.0.1:8799/v1';$('f-key').value='mock-key'}
+async function init(){const r=await api('providers');PROV=r.providers||{};TASKS=r.tasks||[];
+const tg=$('tasks');tg.innerHTML='';TASKS.forEach(t=>{tg.innerHTML+='<label><input type="checkbox" class="tck" value="'+esc(t.id)+'" checked>'+esc(t.id)+' <span style="color:var(--dim)">'+esc(t.name)+'</span></label>'});
+$('f-provider').innerHTML=providerOptions();
+if(!document.querySelectorAll('.prow').length)addRow()}
+async function runBench(){const rows=[...document.querySelectorAll('.prow')].map(rowData);const tasks=[...document.querySelectorAll('.tck:checked')].map(x=>x.value);
+if(!rows.length||!rows[0].provider){alert('请先添加至少一个供应商');return}
 $('bench-out').innerHTML='<pre>运行中(真实网关可能需数十秒)...</pre>';
 const body={rows,tasks,repeat:parseInt($('r-repeat').value)||1,timeout:parseInt($('r-timeout').value)||120,base_url:$('r-base').value};
 const r=await api('run',body);if(!r.ok){render($('bench-out'),r);return}
@@ -98,19 +123,21 @@ rs.forEach(x=>{const m=String(x.passed).match(/(\d+)\/(\d+)/);if(m){passed+=+m[1
 const avgF=firsts.length?(firsts.reduce((a,b)=>a+b,0)/firsts.length).toFixed(0):'—';
 let h='<div class="chips">';
 h+='<div class="chip">客观通过<b>'+passed+' / '+total+'</b></div>';
-h+='<div class="chip">首 token 中位数均值<b>'+avgF+' ms</b></div>';
+h+='<div class="chip">首 token 均值<b>'+avgF+' ms</b></div>';
 h+='<div class="chip">模型数<b>'+new Set(rs.map(x=>x.model)).size+'</b></div></div>';
 h+='<table><tr><th>供应商</th><th>模型</th><th>任务</th><th>次数</th><th>首token(ms)</th><th>总时延(s)</th><th>输入/输出</th><th>成本</th><th>通过</th></tr>';
 rs.forEach(x=>{h+='<tr><td>'+esc(x.pid)+'</td><td>'+esc(x.model)+'</td><td>'+esc(x.task)+'</td><td>'+esc(x.ok_runs)+'/'+esc(x.runs)+'</td><td>'+(x.first_ms==null?'—':esc(x.first_ms))+'</td><td>'+(x.total_ms==null?'—':esc((x.total_ms/1000).toFixed(1)))+'</td><td>'+esc((x.usage_in==null?'—':x.usage_in))+'/'+esc((x.usage_out==null?'—':x.usage_out))+'</td><td>'+esc(x.cost_str)+'</td><td>'+esc(x.passed)+'</td></tr>'});
 h+='</table><div class="hint">生成时间:'+esc(data.generated_at||'-')+' · 通过列 x/y=客观校验通过/可判定次数(- 表示无客观校验)</div>';
 $('bench-out').innerHTML=h}
 async function loadList(){const r=await api('list',{});if(!r.ok){render($('list-box'),r);return}
-const data=r.data||{};const ps=data.providers||{};let h='<table><tr><th>供应商</th><th>默认模型</th><th>协议</th><th>备注</th></tr>';
-Object.keys(ps).forEach(pid=>{const p=ps[pid];const protos=[];if(p.base_url)protos.push('chat');if(p.anthropic_base_url)protos.push('anthropic');if(p.responses_api)protos.push('responses');const first=(p.models||[])[0];h+='<tr><td>'+esc(pid)+'</td><td>'+esc(first?first.id:'(无内置模型)')+'</td><td>'+esc(protos.join('/'))+'</td><td>'+esc((p.note||'').slice(0,48))+'</td></tr>'});
+const data=r.data||{};const ps=data.providers||{};let h='<table><tr><th>分类</th><th>供应商</th><th>默认模型</th><th>协议</th><th>备注</th></tr>';
+Object.keys(ps).forEach(pid=>{const p=ps[pid];const protos=[];if(p.base_url)protos.push('chat');if(p.anthropic_base_url)protos.push('anthropic');if(p.responses_api)protos.push('responses');const first=(p.models||[])[0];
+h+='<tr><td>'+esc(p.category||'-')+'</td><td>'+esc(pid)+'</td><td>'+esc(first?first.id:'(无内置模型)')+'</td><td>'+esc(protos.join('/'))+'</td><td>'+esc((p.note||'').slice(0,48))+'</td></tr>'});
 h+='</table><h2 style="margin-top:14px">内置任务</h2><table><tr><th>任务</th><th>名称</th><th>校验</th></tr>';
 (data.tasks||[]).forEach(t=>{const ch={py_fib:'✓执行验证',json_keys:'✓结构校验',contains:'✓答案校验'}[t.check||'']||'-';h+='<tr><td>'+esc(t.id)+'</td><td>'+esc(t.name)+'</td><td>'+esc(ch)+'</td></tr>'});
 h+='</table>';$('list-box').innerHTML=h}
-async function runRefresh(){const r=await api('refresh',{provider:$('f-provider').value,base_url:$('f-base').value,key:$('f-key').value});render($('refresh-out'),r)}
+async function runRefresh(){const r=await api('refresh',{provider:$('f-provider').value,base_url:$('f-base').value,key:$('f-key').value});
+if(r.ok){render($('refresh-out'),r);await init()}else{render($('refresh-out'),r)}}
 init();
 </script></body></html>"""
 
@@ -194,8 +221,8 @@ API = {"run": api_run, "list": api_list, "refresh": api_refresh}
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "llmbench-web/0.1"
-    port = 8788
+    server_version = "llmbench-web/0.2"
+    port = 8789
     aicn_url = "http://127.0.0.1:8787/"
 
     def log_message(self, *args):

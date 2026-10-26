@@ -162,3 +162,20 @@ class TestWeb(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+
+class TestCategoryData(unittest.TestCase):
+    def test_category_field(self):
+        import llmbench
+        data = llmbench.load_json(llmbench.DATA_FILE)
+        for pid, p in data["providers"].items():
+            self.assertIn("category", p, "provider %s 缺少 category" % pid)
+
+
+class TestWebProviders(unittest.TestCase):
+    def test_providers_api_has_category(self):
+        from llmbench import webui
+        res = webui.api_providers()
+        self.assertTrue(res["ok"])
+        for p in res["providers"].values():
+            self.assertIn("category", p)

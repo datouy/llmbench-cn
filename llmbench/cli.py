@@ -528,7 +528,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_refresh.add_argument("--key", "-k", help="API Key（缺省读环境变量）")
     p_web = sub.add_parser("web", help="启动本地 Web 面板（浏览器操作）")
     p_web.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
-    p_web.add_argument("--port", type=int, default=8788, help="端口（默认 8788）")
+    p_web.add_argument("--port", type=int, default=8789, help="端口（默认 8789）")
     p_web.add_argument("--no-open", action="store_true", help="启动后不自动打开浏览器")
     return parser
 

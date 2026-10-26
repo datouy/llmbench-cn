@@ -30,7 +30,8 @@
           "context": "128K",
           "desc": "深度推理（思考模式）"
         }
-      ]
+      ],
+      "category": "国产直连"
     },
     "moonshot": {
       "name": "Moonshot AI",
@@ -51,7 +52,8 @@
           "context": "256K",
           "desc": "K3 系列最新型号（具体型号名以控制台为准）"
         }
-      ]
+      ],
+      "category": "国产直连"
     },
     "zhipu": {
       "name": "Zhipu AI",
@@ -80,7 +82,8 @@
           "context": "200K",
           "desc": "高速低价（型号名以官网为准）"
         }
-      ]
+      ],
+      "category": "国产直连"
     },
     "qwen": {
       "name": "Alibaba Cloud",
@@ -117,7 +120,8 @@
           "context": "32K",
           "desc": "旗舰"
         }
-      ]
+      ],
+      "category": "国产直连"
     },
     "doubao": {
       "name": "Volcengine Ark",
@@ -138,7 +142,8 @@
           "context": "32K",
           "desc": "主力通用（新系列型号以控制台为准）"
         }
-      ]
+      ],
+      "category": "国产直连"
     },
     "siliconflow": {
       "name": "SiliconFlow",
@@ -159,7 +164,8 @@
           "context": "64K",
           "desc": "示例模型名，以官网模型列表为准"
         }
-      ]
+      ],
+      "category": "聚合平台"
     },
     "openrouter": {
       "name": "OpenRouter",
@@ -180,7 +186,8 @@
           "context": "128K",
           "desc": "示例型号，以官网为准"
         }
-      ]
+      ],
+      "category": "聚合平台"
     },
     "openai": {
       "name": "OpenAI",
@@ -201,7 +208,8 @@
           "context": "128K",
           "desc": "示例型号，以官网为准"
         }
-      ]
+      ],
+      "category": "海外官方"
     },
     "anthropic": {
       "name": "Anthropic",
@@ -222,7 +230,8 @@
           "context": "200K",
           "desc": "示例型号，以官网为准"
         }
-      ]
+      ],
+      "category": "海外官方"
     },
     "gateway": {
       "name": "OpenAI-Compatible Gateway",
@@ -235,7 +244,8 @@
       "currency": "CNY",
       "note": "任意 OpenAI 兼容网关（WorkBuddy2API-Hub / one-api / new-api 等）；用 --base-url 覆盖地址，用 refresh 导入 /models 模型列表。",
       "models": [],
-      "models_refreshed_at": "2026-10-26 10:43"
+      "models_refreshed_at": "2026-10-26 11:53",
+      "category": "自建网关"
     }
   }
 }
