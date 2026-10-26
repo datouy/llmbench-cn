@@ -104,6 +104,17 @@ qwen        qwen-plus        code-fib   3/3   356          1.9        91/130    
 
 任务定义在 `llmbench/data/tasks.json`,改 JSON 即可扩展,欢迎 PR。Tasks live in `llmbench/data/tasks.json` — extend without touching code.
 
+## 🖥️ Web 面板 · Web Panel
+
+不想记参数?一条命令启动本地浏览器面板,点按钮查看清单、跑基准、导入网关模型:
+
+```bash
+python -m llmbench web          # 默认 http://127.0.0.1:8788
+python -m llmbench web --port 9001
+```
+
+面板与命令行复用同一套函数,行为完全一致;密钥只在浏览器与本进程内存之间传递,不落盘。姊妹项目 aicn 自带对应面板(默认 8787),两个面板页首可互跳。
+
 ## 🧰 命令一览 · Commands
 
 | 命令 / Command | 说明 / What it does |
@@ -111,6 +122,7 @@ qwen        qwen-plus        code-fib   3/3   356          1.9        91/130    
 | `llmbench list [--tasks] [--json]` | 查看供应商/模型/任务 / providers & tasks |
 | `llmbench run -p 供应商[:密钥] -m 模型 [-t 任务] [-n 次数] [--base-url 网关] [--json] [--save 文件] [-v]` | 运行实测 / run benchmarks |
 | `llmbench refresh [-p gateway] [--base-url 网关] [-k 密钥]` | 从网关 `/models` 导入模型列表,写入数据文件 / import gateway models |
+| `llmbench web [--port 8788] [--no-open]` | 本地 Web 面板 / local web panel | `python -m llmbench web` |
 
 密钥读取顺序:内联 `-p deepseek:sk-xxx` → 环境变量 `DEEPSEEK_API_KEY`。Key resolution: inline first, then env var.
 

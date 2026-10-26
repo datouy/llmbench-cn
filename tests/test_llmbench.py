@@ -129,3 +129,36 @@ class TestCommands(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWeb(unittest.TestCase):
+    """web 面板基础可用性:页面与 /api/list。"""
+
+    def test_parser_has_web(self):
+        from llmbench import cli
+        ns = cli.build_parser().parse_args(["web", "--port", "0", "--no-open"])
+        self.assertEqual(ns.command, "web")
+        self.assertEqual(ns.port, 0)
+
+    def test_page_and_list_api(self):
+        import threading
+        import urllib.request
+        from llmbench import webui
+        webui.Handler.port = 0
+        srv = webui.ThreadingHTTPServer(("127.0.0.1", 0), webui.Handler)
+        port = srv.server_address[1]
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:%d/" % port, timeout=5) as r:
+                self.assertEqual(r.status, 200)
+                self.assertIn("llmbench", r.read().decode("utf-8"))
+            req = urllib.request.Request("http://127.0.0.1:%d/api/list" % port,
+                                         data=b"{}", method="POST")
+            with urllib.request.urlopen(req, timeout=5) as r:
+                data = json.loads(r.read().decode("utf-8"))
+                self.assertIn("providers", data["data"])
+                self.assertIn("tasks", data["data"])
+        finally:
+            srv.shutdown()
+            srv.server_close()

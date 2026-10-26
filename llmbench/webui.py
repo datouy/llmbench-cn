@@ -1,0 +1,262 @@
+# -*- coding: utf-8 -*-
+"""llmbench-cn Web 面板 —— 零依赖本地面板(启动:python -m llmbench web)
+
+面板直接复用 cli 的命令函数,与命令行行为完全一致。
+不保存任何密钥:密钥只存在于浏览器与本次请求进程内存之间。
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+import json
+import threading
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from . import cli
+
+HTML = r"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>llmbench-cn · Web 面板</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--line:#30363d;--fg:#e6edf3;--dim:#8b949e;--acc:#3fb950;--ok:#3fb950;--bad:#f85149}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.6 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;padding:20px}
+h1{font-size:20px;margin:0}.sub{color:var(--dim);font-size:12px;margin:4px 0 18px}a{color:#58a6ff}
+.wrap{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}
+.card h2{font-size:15px;margin:0 0 12px}
+label{display:block;font-size:12px;color:var(--dim);margin:8px 0 4px}
+input,select{width:100%;background:#0d1117;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:7px 9px;font-size:13px}
+.row3{display:flex;gap:8px;align-items:flex-end}.row3>*{flex:1}.row3 button{flex:0 0 auto}
+button{background:#21262d;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:8px 14px;font-size:13px;cursor:pointer;margin-top:12px}
+button:hover{border-color:var(--acc)}button.primary{background:rgba(63,185,80,.12);border-color:var(--acc)}
+button.alt{background:rgba(88,166,255,.12);border-color:#58a6ff;margin-left:8px}
+pre,.out{background:#010409;border:1px solid var(--line);border-radius:8px;padding:12px;font:12.5px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-all;max-height:420px;overflow:auto;margin:10px 0 0}
+table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px}
+th,td{border:1px solid var(--line);padding:6px 8px;text-align:left}th{color:var(--dim);font-weight:600}
+.chips{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+.chip{background:#010409;border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:12px}
+.chip b{display:block;font-size:16px;color:var(--acc)}
+.taskgrid{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:13px}
+.taskgrid label{display:flex;gap:6px;align-items:center;margin:2px 0;color:var(--fg)}
+.taskgrid input{width:auto}
+.hint{color:var(--dim);font-size:12px;margin-top:8px}
+.prow{display:flex;gap:8px;margin-top:10px}.prow>*{flex:1}.prow .del{flex:0 0 auto;background:#2d1517;border-color:#5c2d30;color:#f0a8a8}
+</style></head><body>
+<h1>llmbench-cn <span style="color:var(--acc)">Web 面板</span></h1>
+<div class="sub">国产大模型自测选型:首 token 延迟 / 成本 / 客观任务通过率 · 零依赖 · 端口 __PORT__ · 姊妹项目:<a href="__AICN_URL__" target="_blank">aicn 面板</a></div>
+<div class="wrap">
+<div class="card" style="grid-column:1/-1">
+<h2>① 基准测试</h2>
+<div id="prows"></div>
+<button class="alt" onclick="addRow()">+ 添加供应商(对比测试)</button>
+<label>任务(勾选,默认全跑)</label>
+<div class="taskgrid" id="tasks"></div>
+<div class="row3">
+<div><label>重复次数</label><input id="r-repeat" type="number" min="1" max="10" value="2"></div>
+<div><label>超时(秒)</label><input id="r-timeout" type="number" min="5" value="120"></div>
+<div><label>覆盖 base_url(可选)</label><input id="r-base" placeholder="如 http://106.55.225.14/v1"></div>
+</div>
+<button class="primary" onclick="runBench()">开始基准测试</button>
+<button class="alt" onclick="fillMock()">一键填入本地 mock 网关</button>
+<div id="bench-out"></div>
+<div class="hint">密钥只进入本次请求内存,面板不保存、不落盘。真实网关限流(429)时请减少重复次数或换模型。</div>
+</div>
+<div class="card">
+<h2>② 供应商 / 任务清单</h2>
+<button class="primary" onclick="loadList()">加载清单</button>
+<div id="list-box"></div>
+</div>
+<div class="card">
+<h2>③ 从网关导入模型 refresh</h2>
+<label>供应商 id</label><input id="f-provider" value="gateway">
+<label>网关地址</label><input id="f-base" placeholder="如 http://106.55.225.14/v1">
+<label>API Key(可选)</label><input id="f-key" type="password">
+<button class="primary" onclick="runRefresh()">导入 /models 到数据文件</button>
+<div id="refresh-out"></div>
+</div>
+</div>
+<script>
+const $=s=>document.getElementById(s);
+async function api(path,body){const r=await fetch('/api/'+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});return r.json()}
+function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function render(el,obj){const pre=document.createElement('pre');let t='';if(obj.error)t+='错误: '+obj.error+'\n';if(obj.exit&&obj.exit!==0)t+='[退出码 '+obj.exit+']\n';if(obj.note)t+=obj.note+'\n';pre.textContent=t+(obj.out||'(无输出)');el.innerHTML='';el.appendChild(pre)}
+let PROV={},TASKS=[];
+async function init(){const r=await api('providers');PROV=r.providers||{};TASKS=r.tasks||[];const tg=$('tasks');tg.innerHTML='';TASKS.forEach(t=>{tg.innerHTML+='<label><input type="checkbox" class="tck" value="'+esc(t.id)+'" checked>'+esc(t.id)+' <span style="color:var(--dim)">'+esc(t.name)+'</span></label>'});addRow()}
+function provSelect(v){let h='<select class="psel">';Object.keys(PROV).forEach(p=>{h+='<option value="'+esc(p)+'"'+(p===v?' selected':'')+'>'+esc(p)+'</option>'});h+='</select>';return h}
+function addRow(v){const d=document.createElement('div');d.className='prow';d.innerHTML=provSelect(v||'gateway')+'<input class="pmodel" placeholder="模型(留空用默认)">'+'<input class="pkey" type="password" placeholder="API Key(可选)">'+'<button class="del" onclick="this.parentNode.remove()">✕</button>';$('prows').appendChild(d)}
+function rowData(d){return {provider:d.querySelector('.psel').value,model:d.querySelector('.pmodel').value,key:d.querySelector('.pkey').value}}
+function fillMock(){const rows=[...document.querySelectorAll('.prow')];rows.slice(1).forEach(r=>r.remove());const d=rows[0];d.querySelector('.psel').value='gateway';d.querySelector('.pmodel').value='mock-model';d.querySelector('.pkey').value='mock-key';$('r-base').value='http://127.0.0.1:8799/v1';$('r-repeat').value='2'}
+async function runBench(){const rows=[...document.querySelectorAll('.prow')].map(rowData);const tasks=[...document.querySelectorAll('.tck:checked')].map(x=>x.value);if(!rows.length||!rows[0].provider){alert('请先添加至少一个供应商');return}
+$('bench-out').innerHTML='<pre>运行中(真实网关可能需数十秒)...</pre>';
+const body={rows,tasks,repeat:parseInt($('r-repeat').value)||1,timeout:parseInt($('r-timeout').value)||120,base_url:$('r-base').value};
+const r=await api('run',body);if(!r.ok){render($('bench-out'),r);return}
+const data=r.data||{};const rs=data.rows||[];
+let passed=0,total=0,firsts=[];
+rs.forEach(x=>{const m=String(x.passed).match(/(\d+)\/(\d+)/);if(m){passed+=+m[1];total+=+m[2]}if(x.first_ms!=null)firsts.push(x.first_ms)});
+const avgF=firsts.length?(firsts.reduce((a,b)=>a+b,0)/firsts.length).toFixed(0):'—';
+let h='<div class="chips">';
+h+='<div class="chip">客观通过<b>'+passed+' / '+total+'</b></div>';
+h+='<div class="chip">首 token 中位数均值<b>'+avgF+' ms</b></div>';
+h+='<div class="chip">模型数<b>'+new Set(rs.map(x=>x.model)).size+'</b></div></div>';
+h+='<table><tr><th>供应商</th><th>模型</th><th>任务</th><th>次数</th><th>首token(ms)</th><th>总时延(s)</th><th>输入/输出</th><th>成本</th><th>通过</th></tr>';
+rs.forEach(x=>{h+='<tr><td>'+esc(x.pid)+'</td><td>'+esc(x.model)+'</td><td>'+esc(x.task)+'</td><td>'+esc(x.ok_runs)+'/'+esc(x.runs)+'</td><td>'+(x.first_ms==null?'—':esc(x.first_ms))+'</td><td>'+(x.total_ms==null?'—':esc((x.total_ms/1000).toFixed(1)))+'</td><td>'+esc((x.usage_in==null?'—':x.usage_in))+'/'+esc((x.usage_out==null?'—':x.usage_out))+'</td><td>'+esc(x.cost_str)+'</td><td>'+esc(x.passed)+'</td></tr>'});
+h+='</table><div class="hint">生成时间:'+esc(data.generated_at||'-')+' · 通过列 x/y=客观校验通过/可判定次数(- 表示无客观校验)</div>';
+$('bench-out').innerHTML=h}
+async function loadList(){const r=await api('list',{});if(!r.ok){render($('list-box'),r);return}
+const data=r.data||{};const ps=data.providers||{};let h='<table><tr><th>供应商</th><th>默认模型</th><th>协议</th><th>备注</th></tr>';
+Object.keys(ps).forEach(pid=>{const p=ps[pid];const protos=[];if(p.base_url)protos.push('chat');if(p.anthropic_base_url)protos.push('anthropic');if(p.responses_api)protos.push('responses');const first=(p.models||[])[0];h+='<tr><td>'+esc(pid)+'</td><td>'+esc(first?first.id:'(无内置模型)')+'</td><td>'+esc(protos.join('/'))+'</td><td>'+esc((p.note||'').slice(0,48))+'</td></tr>'});
+h+='</table><h2 style="margin-top:14px">内置任务</h2><table><tr><th>任务</th><th>名称</th><th>校验</th></tr>';
+(data.tasks||[]).forEach(t=>{const ch={py_fib:'✓执行验证',json_keys:'✓结构校验',contains:'✓答案校验'}[t.check||'']||'-';h+='<tr><td>'+esc(t.id)+'</td><td>'+esc(t.name)+'</td><td>'+esc(ch)+'</td></tr>'});
+h+='</table>';$('list-box').innerHTML=h}
+async function runRefresh(){const r=await api('refresh',{provider:$('f-provider').value,base_url:$('f-base').value,key:$('f-key').value});render($('refresh-out'),r)}
+init();
+</script></body></html>"""
+
+
+def _run(fn, ns) -> dict:
+    """在线程中执行 cli 命令函数,捕获 stdout/stderr 与 SystemExit。"""
+    out_buf, err_buf = io.StringIO(), io.StringIO()
+    box = {}
+
+    def worker():
+        try:
+            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                box["out"] = fn(ns) or ""
+        except SystemExit as exc:
+            box["exit"] = exc.code or 0
+        except Exception as exc:
+            box["error"] = "%s: %s" % (type(exc).__name__, exc)
+
+    th = threading.Thread(target=worker, daemon=True)
+    th.start()
+    th.join(timeout=900)
+    if th.is_alive():
+        box["note"] = "任务仍在后台执行,超 900s 未返回。"
+    out = out_buf.getvalue() + err_buf.getvalue() + box.get("out", "")
+    return {"ok": box.get("error") is None and box.get("exit", 0) == 0,
+            "exit": box.get("exit", 0), "error": box.get("error", ""),
+            "note": box.get("note", ""), "out": out.strip()}
+
+
+def api_providers() -> dict:
+    data = cli.load_json(cli.DATA_FILE)
+    tasks = cli.load_json(cli.TASKS_FILE)
+    return {"ok": True, "providers": data.get("providers", {}), "tasks": tasks.get("tasks", [])}
+
+
+def api_list(body: dict) -> dict:
+    ns = argparse.Namespace(tasks=False, json=True)
+    res = _run(cli.cmd_list, ns)
+    if res["ok"]:
+        try:
+            res["data"] = json.loads(res["out"])
+            res["out"] = ""
+        except Exception:
+            pass
+    return res
+
+
+def api_run(body: dict) -> dict:
+    rows = [r for r in body.get("rows", []) if r.get("provider")]
+    if not rows:
+        return {"ok": False, "error": "请至少提供一个供应商"}
+    provider_tokens, models = [], []
+    for r in rows:
+        token = r["provider"] + (":" + str(r.get("key")) if r.get("key") else "")
+        provider_tokens.append(token)
+        models.append(r.get("model") or None)
+    tasks = body.get("tasks") or None
+    ns = argparse.Namespace(provider=provider_tokens, model=models,
+                            task=tasks, repeat=int(body.get("repeat") or 1),
+                            max_tokens=0, base_url=body.get("base_url") or None,
+                            timeout=int(body.get("timeout") or 120),
+                            json=True, save=None, verbose=False)
+    res = _run(cli.cmd_run, ns)
+    if res["ok"]:
+        try:
+            res["data"] = json.loads(res["out"])
+            res["out"] = ""
+        except Exception:
+            pass
+    return res
+
+
+def api_refresh(body: dict) -> dict:
+    ns = argparse.Namespace(provider=body.get("provider") or "gateway",
+                            base_url=body.get("base_url") or None,
+                            key=body.get("key") or None)
+    return _run(cli.cmd_refresh, ns)
+
+
+API = {"run": api_run, "list": api_list, "refresh": api_refresh}
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "llmbench-web/0.1"
+    port = 8788
+    aicn_url = "http://127.0.0.1:8787/"
+
+    def log_message(self, *args):
+        pass
+
+    def _send(self, code, body, ctype="application/json; charset=utf-8"):
+        data = body.encode("utf-8") if isinstance(body, str) else \
+            json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path in ("/", "/index.html"):
+            page = HTML.replace("__PORT__", str(self.port)) \
+                       .replace("__AICN_URL__", self.aicn_url)
+            self._send(200, page, "text/html; charset=utf-8")
+            return
+        if self.path == "/api/providers":
+            self._send(200, api_providers())
+            return
+        self._send(404, {"ok": False, "error": "not found"})
+
+    def do_POST(self):
+        if not self.path.startswith("/api/"):
+            self._send(404, {"ok": False, "error": "not found"})
+            return
+        name = self.path[5:]
+        if name == "providers":
+            self._send(200, api_providers())
+            return
+        fn = API.get(name)
+        if not fn:
+            self._send(404, {"ok": False, "error": "unknown api: " + name})
+            return
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(n) or b"{}")
+        except Exception:
+            self._send(400, {"ok": False, "error": "bad json"})
+            return
+        try:
+            self._send(200, fn(body))
+        except Exception as exc:
+            self._send(500, {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)})
+
+
+def cmd_web(args: argparse.Namespace) -> int:
+    Handler.port = args.port
+    Handler.aicn_url = getattr(args, "aicn_url", None) or "http://127.0.0.1:8787/"
+    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    url = "http://%s:%d/" % (args.host, srv.server_address[1])
+    print("llmbench Web 面板:%s(Ctrl+C 停止)" % url)
+    if not args.no_open:
+        threading.Thread(target=lambda: webbrowser.open(url), daemon=True).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\n面板已停止")
+    finally:
+        srv.server_close()
+    return 0
