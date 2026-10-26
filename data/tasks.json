@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "updated": "2026-10",
+  "disclaimer": "内置任务用于客观指标测量（速度/成本/通过率），不代表权威能力排名；代码类任务会在临时目录中运行模型生成的代码。",
+  "tasks": [
+    {
+      "id": "code-fib",
+      "name": "编程:斐波那契函数",
+      "prompt": "用 Python 写一个函数 fib(n)，返回斐波那契数列第 n 项（fib(0)=0, fib(1)=1）。只输出代码，不要任何解释。",
+      "max_tokens": 512,
+      "check": "py_fib"
+    },
+    {
+      "id": "json-extract",
+      "name": "结构化抽取",
+      "prompt": "从下面文本中提取信息，只输出一个 JSON 对象，包含键 name(字符串)、city(字符串)、count(整数)：\n\"张三在北京工作了 5 年。\"",
+      "max_tokens": 256,
+      "check": "json_keys",
+      "check_params": {"name": "str", "city": "str", "count": "int"}
+    },
+    {
+      "id": "math",
+      "name": "数学推理",
+      "prompt": "一个数加上它的一半等于 21，这个数是多少？只输出答案。",
+      "max_tokens": 128,
+      "check": "contains",
+      "check_params": {"keywords": ["14"]}
+    },
+    {
+      "id": "sql",
+      "name": "SQL 编写",
+      "prompt": "表 orders(id, user_id, amount, created_at)。写一条 SQL，查询每个用户的总消费金额，按总金额从高到低排序。只输出 SQL。",
+      "max_tokens": 256,
+      "check": null
+    },
+    {
+      "id": "zh-summary",
+      "name": "中文摘要",
+      "prompt": "用不超过 40 个字概括下面这段话：\"深度学习通过多层神经网络自动学习数据的层次化特征表示，在图像识别、语音识别和自然语言处理等领域取得了突破性进展，已成为人工智能领域的核心技术之一。\"",
+      "max_tokens": 128,
+      "check": null
+    }
+  ]
+}

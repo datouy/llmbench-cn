@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "price_updated": "2026-10",
+  "disclaimer": "模型名称与价格为整理时点的信息，变动频繁，请以各官方平台为准；价格单位：CNY=人民币/1M tokens，USD=美元/1M tokens。",
+  "providers": {
+    "deepseek": {
+      "name": "DeepSeek",
+      "cn": "深度求索",
+      "site": "https://platform.deepseek.com",
+      "base_url": "https://api.deepseek.com",
+      "anthropic_base_url": null,
+      "responses_api": null,
+      "env_key": "DEEPSEEK_API_KEY",
+      "currency": "CNY",
+      "note": "国内直连、无需代理；官方提供 OpenAI 兼容 chat 接口，未官方确认支持 Responses 协议。",
+      "models": [
+        {"id": "deepseek-chat", "input": 2.0, "output": 3.0, "cache_hit_input": 0.2, "context": "128K", "desc": "通用/编码（非思考模式，别名长期稳定）"},
+        {"id": "deepseek-reasoner", "input": 4.0, "output": 16.0, "cache_hit_input": 1.0, "context": "128K", "desc": "深度推理（思考模式）"}
+      ]
+    },
+    "moonshot": {
+      "name": "Moonshot AI",
+      "cn": "月之暗面 Kimi",
+      "site": "https://platform.moonshot.cn",
+      "base_url": "https://api.moonshot.cn/v1",
+      "anthropic_base_url": "https://api.moonshot.cn/anthropic",
+      "responses_api": null,
+      "env_key": "MOONSHOT_API_KEY",
+      "currency": "CNY",
+      "note": "K3 系列提供 OpenAI 兼容接口与 Anthropic 兼容端点（Claude Code 原生接入）；另有 Kimi Code 产品线。",
+      "models": [
+        {"id": "kimi-latest", "input": null, "output": null, "cache_hit_input": null, "context": "256K", "desc": "K3 系列最新型号（具体型号名以控制台为准）"}
+      ]
+    },
+    "zhipu": {
+      "name": "Zhipu AI",
+      "cn": "智谱 GLM",
+      "site": "https://open.bigmodel.cn",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "anthropic_base_url": "https://open.bigmodel.cn/api/anthropic",
+      "responses_api": null,
+      "env_key": "ZHIPU_API_KEY",
+      "currency": "CNY",
+      "note": "GLM 编码套餐官方宣称支持 Claude Code / Codex / ZCode / Kilo Code，具体端点与型号见官网。",
+      "models": [
+        {"id": "glm-5.3", "input": null, "output": null, "cache_hit_input": null, "context": "200K", "desc": "旗舰（型号名以官网为准）"},
+        {"id": "glm-5.3-flash", "input": null, "output": null, "cache_hit_input": null, "context": "200K", "desc": "高速低价（型号名以官网为准）"}
+      ]
+    },
+    "qwen": {
+      "name": "Alibaba Cloud",
+      "cn": "阿里云百炼 Qwen",
+      "site": "https://bailian.console.aliyun.com",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "anthropic_base_url": null,
+      "responses_api": true,
+      "env_key": "DASHSCOPE_API_KEY",
+      "currency": "CNY",
+      "note": "compatible-mode 端点同时提供 chat 与 responses 兼容；新系列型号名见控制台，需先开通模型。",
+      "models": [
+        {"id": "qwen-plus", "input": 0.8, "output": 2.0, "cache_hit_input": 0.2, "context": "131K", "desc": "均衡性能"},
+        {"id": "qwen-turbo", "input": 0.3, "output": 0.6, "cache_hit_input": null, "context": "1M", "desc": "低价快速"},
+        {"id": "qwen-max", "input": 2.4, "output": 9.6, "cache_hit_input": null, "context": "32K", "desc": "旗舰"}
+      ]
+    },
+    "doubao": {
+      "name": "Volcengine Ark",
+      "cn": "火山方舟 豆包",
+      "site": "https://console.volcengine.com/ark",
+      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "anthropic_base_url": null,
+      "responses_api": null,
+      "env_key": "ARK_API_KEY",
+      "currency": "CNY",
+      "note": "模型需在方舟控制台创建推理接入点（ep-xxx）或直接用模型名；API Key 在控制台生成。",
+      "models": [
+        {"id": "doubao-1.5-pro-32k", "input": 0.8, "output": 2.0, "cache_hit_input": null, "context": "32K", "desc": "主力通用（新系列型号以控制台为准）"}
+      ]
+    },
+    "siliconflow": {
+      "name": "SiliconFlow",
+      "cn": "硅基流动",
+      "site": "https://siliconflow.cn",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "anthropic_base_url": "https://api.siliconflow.cn/anthropic",
+      "responses_api": null,
+      "env_key": "SILICONFLOW_API_KEY",
+      "currency": "CNY",
+      "note": "聚合国内外开源模型（DeepSeek/Qwen/GLM 等），新用户有免费额度，价格随模型动态变化。",
+      "models": [
+        {"id": "deepseek-ai/DeepSeek-V3.2", "input": null, "output": null, "cache_hit_input": null, "context": "64K", "desc": "示例模型名，以官网模型列表为准"}
+      ]
+    },
+    "openrouter": {
+      "name": "OpenRouter",
+      "cn": "OpenRouter",
+      "site": "https://openrouter.ai",
+      "base_url": "https://openrouter.ai/api/v1",
+      "anthropic_base_url": null,
+      "responses_api": null,
+      "env_key": "OPENROUTER_API_KEY",
+      "currency": "USD",
+      "note": "海外聚合平台，美元计费，需要海外支付方式，国内访问可能受限。",
+      "models": [
+        {"id": "openai/gpt-4o", "input": null, "output": null, "cache_hit_input": null, "context": "128K", "desc": "示例型号，以官网为准"}
+      ]
+    },
+    "openai": {
+      "name": "OpenAI",
+      "cn": "OpenAI 官方",
+      "site": "https://platform.openai.com",
+      "base_url": "https://api.openai.com/v1",
+      "anthropic_base_url": null,
+      "responses_api": true,
+      "env_key": "OPENAI_API_KEY",
+      "currency": "USD",
+      "note": "官方 Responses/Chat API；国内无法直连，需自行解决网络与支付。",
+      "models": [
+        {"id": "gpt-4o", "input": null, "output": null, "cache_hit_input": null, "context": "128K", "desc": "示例型号，以官网为准"}
+      ]
+    },
+    "anthropic": {
+      "name": "Anthropic",
+      "cn": "Anthropic 官方",
+      "site": "https://console.anthropic.com",
+      "base_url": "https://api.anthropic.com",
+      "anthropic_base_url": null,
+      "responses_api": false,
+      "env_key": "ANTHROPIC_API_KEY",
+      "currency": "USD",
+      "note": "Claude 官方，使用 Anthropic 原生协议；国内无法直连。",
+      "models": [
+        {"id": "claude-sonnet-4-5", "input": null, "output": null, "cache_hit_input": null, "context": "200K", "desc": "示例型号，以官网为准"}
+      ]
+    }
+  }
+}
