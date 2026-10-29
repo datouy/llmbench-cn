@@ -10,13 +10,19 @@
 | 新增供应商 | `llmbench/data/providers.json` | ❌ |
 | 新增基准任务 | `llmbench/data/tasks.json` | ❌ |
 | 修 bug / 加命令 | `llmbench/cli.py` | ✅ |
+| 改面板 | `llmbench/webui.py` | ✅ |
 | 测试 | `tests/` | ✅ |
 
 ## 数据贡献(最常见)
 
 1. **更新价格**:找到对应供应商的 `models` 列表,修改 `input` / `output`(单位:¥ 或 $ / 1M tokens),同时更新顶层 `price_updated` 为当前年月;
-2. **新增供应商**:复制一个结构相似的条目,填 `name`、`cn`、`site`、`base_url`、`env_key`、`currency`、`note`,以及至少一个 `models` 条目;`responses_api` 填 `true` / `false` / `null`(null = 未确认);
+2. **新增供应商**:复制一个结构相似的条目,填 `name`、`cn`、`site`、`base_url`、`env_key`、`currency`、`note`、`category`,以及至少一个 `models` 条目;`responses_api` 填 `true` / `false` / `null`(null = 未确认);
 3. **新增任务**:在 `tasks.json` 里加一个对象:`id`(kebab-case)、`name`、`prompt`、`max_tokens`,可选 `check`(`py_fib` / `json_keys` / `contains` / `null`)与 `check_params`。
+
+> ⚠️ **只改内置数据文件** `llmbench/data/providers.json`。
+> `llmbench refresh` 写入的是**用户数据层** `~/.llmbench/providers.json`(pip 安装目录通常是只读的,
+> 写进去会失败;而且不该污染安装)。CI 会校验内置数据文件不被测试改动。
+> 想把自己网关的模型列表长期用下去,直接跑 `llmbench refresh` 即可,不用改仓库。
 
 ## 代码贡献
 
@@ -28,6 +34,10 @@ python -m unittest discover -s tests -v   # 全部通过再提交
 
 - 保持**零第三方依赖**(标准库 only),除非有非常充分的理由;
 - 命令行为不要破坏向后兼容(改动 CLI 参数需在 PR 描述中说明);
+- **不要用 `contextlib.redirect_stdout` 捕获输出**——它改的是全局 `sys.stdout`,Web 面板并发请求会互相串台。
+  请用 `llmbench.cli.capture_output`(基于 `contextvars`,按线程隔离);
+- 写数据文件的测试必须把 `cli.USER_DATA_FILE` / `cli.USER_DATA_DIR` 重定向到临时目录,
+  否则会写脏仓库或用户主目录;
 - 提交信息用中文或英文皆可,推荐 Conventional Commits 风格(`feat:` / `fix:` / `docs:`)。
 
 ## PR 流程
