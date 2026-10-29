@@ -24,3 +24,20 @@ jobs:
           python -m llmbench --version
           python -m llmbench list --json > /dev/null
           python -m llmbench list --tasks
+          python -m llmbench list --provider deepseek
+          python -m llmbench doctor
+      - name: 校验内置数据未被测试污染
+        # 测试若写脏 llmbench/data/providers.json 会让 CI 与本地行为不一致
+        run: |
+          if ! git diff --exit-code -- llmbench/data/; then
+            echo "::error::内置数据文件被测试或命令修改了,应只写用户数据层(~/.llmbench)"
+            git diff -- llmbench/data/
+            exit 1
+          fi
+      - name: 校验版本号一致
+        # pyproject.toml 与 llmbench/cli.py 的 VERSION 必须一致，避免 --version 与包元数据打架
+        run: |
+          pip_version=$(python -c "import re;print(re.search(r'^version\s*=\s*\"([^\"]+)\"', open('pyproject.toml',encoding='utf-8').read(), re.M).group(1))")
+          code_version=$(python -c "from llmbench import cli;print(cli.VERSION)")
+          echo "pyproject=$pip_version cli=$code_version"
+          test "$pip_version" = "$code_version" || { echo "::error::版本号不一致"; exit 1; }
