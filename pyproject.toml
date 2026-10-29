@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llmbench-cn"
-version = "0.1.0"
+version = "0.2.0"
 description = "国产大模型自测选型 CLI:速度 / 成本 / 客观任务通过率(零依赖)"
 readme = "README.md"
 license = {text = "MIT"}
@@ -20,6 +20,11 @@ classifiers = [
 
 [project.scripts]
 llmbench = "llmbench.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/datouy/llmbench-cn"
+Repository = "https://github.com/datouy/llmbench-cn"
+Issues = "https://github.com/datouy/llmbench-cn/issues"
 
 [tool.setuptools]
 packages = ["llmbench"]

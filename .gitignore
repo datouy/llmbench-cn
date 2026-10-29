@@ -7,3 +7,6 @@ dist/
 build/
 *.egg-info/
 *.aicn.bak
+*.llmbench.bak
+report.json
+report.md
