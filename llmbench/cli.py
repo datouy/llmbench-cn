@@ -19,7 +19,9 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import contextvars
+import concurrent.futures
 import json
 import os
 import re
@@ -29,12 +31,18 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 BASE_DIR = Path(__file__).resolve().parent
+
+# 响应安全上限：防止异常网关的无限流/超大响应拖垮本地进程
+MAX_SSE_CONTENT_CHARS = 8 * 1024 * 1024
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_RETRY_WAIT_SECONDS = 60.0
 
 # 内置数据（随包分发，只读）
 PACKAGE_DATA_FILE = BASE_DIR / "data" / "providers.json"
@@ -43,6 +51,7 @@ TASKS_FILE = BASE_DIR / "data" / "tasks.json"
 # 用户数据层：refresh 只写这里，绝不写进已安装的包目录（site-packages 常常只读）
 USER_DATA_DIR = Path(os.path.expanduser("~")) / ".llmbench"
 USER_DATA_FILE = USER_DATA_DIR / "providers.json"
+USER_DATA_LOCK = threading.RLock()
 
 # 向后兼容：旧的 DATA_FILE 仍指向内置数据文件
 DATA_FILE = PACKAGE_DATA_FILE
@@ -119,16 +128,23 @@ class capture_output:
 # 基础工具
 # --------------------------------------------------------------------------
 
+class DataFileError(RuntimeError):
+    """数据文件缺失或损坏。CLI 入口会把它转换成退出码 2。"""
+
+
+class BenchmarkCancelled(RuntimeError):
+    """Web 面板主动取消进行中的基准测试。"""
+
+
 def load_json(path: Path) -> dict:
+    """读取 JSON 数据文件；缺失/损坏时抛 DataFileError，由调用方决定如何呈现。"""
     if not path.exists():
-        emit_err("错误：找不到数据文件 %s" % path)
-        sys.exit(2)
+        raise DataFileError("找不到数据文件 %s" % path)
     try:
         with open(path, encoding="utf-8") as fh:
             return json.load(fh)
     except ValueError as exc:
-        emit_err("错误：数据文件 %s 不是合法 JSON（%s）" % (path, exc))
-        sys.exit(2)
+        raise DataFileError("数据文件 %s 不是合法 JSON（%s）" % (path, exc)) from exc
 
 
 def display_width(text: str) -> int:
@@ -245,14 +261,23 @@ def load_providers() -> dict:
     """返回合并后的供应商表（内置数据 + ~/.llmbench 用户层）。"""
     base = load_json(PACKAGE_DATA_FILE)
     providers = dict(base.get("providers", {}))
-    if USER_DATA_FILE.exists():
-        try:
-            user = json.loads(USER_DATA_FILE.read_text(encoding="utf-8"))
-        except ValueError:
-            user = {}
-        for pid, over in (user.get("providers") or {}).items():
-            providers[pid] = merge_provider(providers.get(pid), over)
+    user = load_user_doc()
+    for pid, over in (user.get("providers") or {}).items():
+        providers[pid] = merge_provider(providers.get(pid), over)
     return providers
+
+
+def load_user_doc() -> dict:
+    """读取用户数据层。损坏时明确报错，绝不静默当作空文档覆盖旧数据。"""
+    if not USER_DATA_FILE.exists():
+        return {}
+    try:
+        return json.loads(USER_DATA_FILE.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        backup = Path(str(USER_DATA_FILE) + ".bak")
+        raise DataFileError(
+            "用户数据层不是合法 JSON：%s（%s）。请先修复或用备份 %s 恢复。"
+            % (USER_DATA_FILE, exc, backup)) from exc
 
 
 def load_provider_doc() -> dict:
@@ -260,34 +285,52 @@ def load_provider_doc() -> dict:
     doc = load_json(PACKAGE_DATA_FILE)
     doc = dict(doc)
     doc["providers"] = load_providers()
-    if USER_DATA_FILE.exists():
-        try:
-            user = json.loads(USER_DATA_FILE.read_text(encoding="utf-8"))
-        except ValueError:
-            user = {}
-        if user.get("price_updated"):
-            doc["price_updated"] = user["price_updated"]
+    user = load_user_doc()
+    if user.get("price_updated"):
+        doc["price_updated"] = user["price_updated"]
     return doc
 
 
 def write_user_providers(providers: dict, price_updated: str | None = None) -> Path:
-    """写入用户数据层（~/.llmbench/providers.json），写入前自动备份 .bak。"""
-    USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if USER_DATA_FILE.exists():
-        shutil.copy2(str(USER_DATA_FILE), str(USER_DATA_FILE) + ".bak")
-    doc = {"schema_version": 1, "providers": providers}
-    if price_updated:
-        doc["price_updated"] = price_updated
-    USER_DATA_FILE.write_text(
-        json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return USER_DATA_FILE
+    """原子写入用户数据层；写入前备份 .bak，并用锁避免并发覆盖。"""
+    with USER_DATA_LOCK:
+        USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        if USER_DATA_FILE.exists():
+            raw = USER_DATA_FILE.read_text(encoding="utf-8", errors="replace")
+            _atomic_write(Path(str(USER_DATA_FILE) + ".bak"), raw)
+        doc = {"schema_version": 1, "providers": providers}
+        if price_updated:
+            doc["price_updated"] = price_updated
+        _atomic_write(USER_DATA_FILE,
+                      json.dumps(doc, ensure_ascii=False, indent=2) + "\n")
+        return USER_DATA_FILE
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """同目录临时文件 + os.replace，避免崩溃留下半截文件。"""
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp",
+                                     dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 # --------------------------------------------------------------------------
 # SSE 流式解析
 # --------------------------------------------------------------------------
 
-def parse_sse_lines(lines, started: float):
+def parse_sse_lines(lines, started: float, deadline: float | None = None,
+                    max_content_chars: int = MAX_SSE_CONTENT_CHARS):
     """从 SSE 行流中解析内容、首 token 延迟与 usage。
 
     started 必须是 time.perf_counter() 的时间点（单调时钟，不受系统时间调整影响）。
@@ -295,7 +338,10 @@ def parse_sse_lines(lines, started: float):
     content_parts: list = []
     first_token_ms = None
     usage = None
+    total_chars = 0
     for raw in lines:
+        if deadline is not None and time.perf_counter() > deadline:
+            raise TimeoutError("流式响应超过总超时")
         line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
         line = line.strip()
         if not line.startswith("data:"):
@@ -321,6 +367,9 @@ def parse_sse_lines(lines, started: float):
             if first_token_ms is None:
                 first_token_ms = int((time.perf_counter() - started) * 1000)
             content_parts.append(piece)
+            total_chars += len(piece)
+            if total_chars > max_content_chars:
+                raise ValueError("流式响应内容超过 %d 字符上限" % max_content_chars)
     content = "".join(content_parts)
     if first_token_ms is None and content:
         first_token_ms = int((time.perf_counter() - started) * 1000)
@@ -341,6 +390,25 @@ def _http_error_message(raw: str, status) -> str:
     text = re.sub(r"<[^>]+>", " ", raw).strip()
     text = re.sub(r"\s+", " ", text)
     return (text or ("HTTP %s" % status))[:200]
+
+
+def _read_response_limited(resp, cap: int = MAX_RESPONSE_BYTES) -> bytes:
+    """读取响应体并限制大小，避免超大响应耗尽内存。"""
+    data = resp.read(cap + 1)
+    if len(data) > cap:
+        raise ValueError("响应体超过 %d 字节上限" % cap)
+    return data
+
+
+def _retry_wait_from(headers, attempt: int, retry_wait: float) -> float:
+    """优先遵循 Retry-After，否则指数退避，并设上限。"""
+    ra = (headers or {}).get("Retry-After")
+    if ra:
+        try:
+            return min(float(ra), MAX_RETRY_WAIT_SECONDS)
+        except ValueError:
+            pass
+    return min(retry_wait * (2 ** (attempt - 1)), MAX_RETRY_WAIT_SECONDS)
 
 
 def request_chat(provider: dict, model: str, prompt: str, key: str,
@@ -367,44 +435,46 @@ def request_chat(provider: dict, model: str, prompt: str, key: str,
         headers["Authorization"] = "Bearer " + key
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
                                  headers=headers, method="POST")
-    started = time.perf_counter()
     attempt = 0
     while True:
+        attempt_started = time.perf_counter()
+        deadline = attempt_started + timeout
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 status = resp.status
                 if stream:
-                    content, first_ms, usage = parse_sse_lines(resp, started)
+                    content, first_ms, usage = parse_sse_lines(
+                        resp, attempt_started, deadline=deadline)
                 else:
-                    raw = resp.read().decode("utf-8", "replace")
+                    raw = _read_response_limited(resp).decode("utf-8", "replace")
                     parsed = json.loads(raw)
                     usage = normalize_usage(parsed.get("usage"))
                     choices = parsed.get("choices") or []
                     content = ""
                     if choices and choices[0].get("message"):
                         content = choices[0]["message"].get("content") or ""
-                    first_ms = int((time.perf_counter() - started) * 1000)
-                total_ms = int((time.perf_counter() - started) * 1000)
+                    first_ms = int((time.perf_counter() - attempt_started) * 1000)
+                total_ms = int((time.perf_counter() - attempt_started) * 1000)
                 return status, content, first_ms, total_ms, usage, None
         except urllib.error.HTTPError as err:
-            raw = err.read().decode("utf-8", "replace")
+            raw = _read_response_limited(err).decode("utf-8", "replace")
             # 429/5xx 属于可重试；其余（如 401/404/400）重试没有意义
             if attempt < retries and (err.code == 429 or 500 <= err.code < 600):
                 attempt += 1
-                wait = retry_wait * (2 ** (attempt - 1))
+                wait = _retry_wait_from(err.headers, attempt, retry_wait)
                 emit_err("提示：HTTP %s，%s 秒后重试（第 %d 次）" % (err.code, wait, attempt))
                 time.sleep(wait)
                 continue
-            total_ms = int((time.perf_counter() - started) * 1000)
+            total_ms = int((time.perf_counter() - attempt_started) * 1000)
             return err.code, "", None, total_ms, None, _http_error_message(raw, err.code)
         except Exception as err:
             if attempt < retries:
                 attempt += 1
-                wait = retry_wait * (2 ** (attempt - 1))
+                wait = _retry_wait_from(None, attempt, retry_wait)
                 emit_err("提示：%s，%s 秒后重试（第 %d 次）" % (err, wait, attempt))
                 time.sleep(wait)
                 continue
-            total_ms = int((time.perf_counter() - started) * 1000)
+            total_ms = int((time.perf_counter() - attempt_started) * 1000)
             return None, "", None, total_ms, None, str(err)[:300]
 
 
@@ -446,6 +516,42 @@ def _strip_dangerous_imports(code: str) -> str:
     return "\n".join(out)
 
 
+_SAFE_BUILTINS = {
+    "range", "len", "sum", "min", "max", "abs", "int", "float", "str",
+    "list", "dict", "tuple", "set", "enumerate", "zip", "map", "filter",
+    "sorted", "reversed", "round", "isinstance", "type", "bool", "print",
+}
+
+
+def _validate_code_ast(code: str) -> bool:
+    """用 AST 白名单拦截动态逃逸：__import__ / eval / exec / open / 属性调用等。"""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+    defined = {n.name for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    defined.add(target.id)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            if isinstance(node.target, ast.Name):
+                defined.add(node.target.id)
+    allowed = _SAFE_BUILTINS | defined
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            return False
+        if isinstance(node, ast.Call):
+            fn = node.func
+            if isinstance(fn, ast.Attribute):
+                return False
+            if isinstance(fn, ast.Name) and fn.id not in allowed:
+                return False
+    return True
+
+
 def check_py_fib(content: str, timeout: int = 30) -> bool:
     """在临时目录中真实运行模型生成的代码，验证 fib 是否正确。
 
@@ -462,6 +568,8 @@ def check_py_fib(content: str, timeout: int = 30) -> bool:
     if not code or "fib" not in code:
         return False
     code = _strip_dangerous_imports(code)
+    if not _validate_code_ast(code):
+        return False
     harness = (code + "\n\n"
                "assert fib(0) == 0\n"
                "assert fib(1) == 1\n"
@@ -471,11 +579,26 @@ def check_py_fib(content: str, timeout: int = 30) -> bool:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "check_fib.py"
         path.write_text(harness, encoding="utf-8")
+        preexec = None
+        if os.name == "posix":
+            try:
+                import resource
+
+                def _limit():
+                    limit = 256 * 1024 * 1024
+                    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+                    resource.setrlimit(resource.RLIMIT_CPU, (timeout, timeout + 1))
+                    resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024, 1024 * 1024))
+                    resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+                preexec = _limit
+            except (ImportError, ValueError):
+                preexec = None
         try:
             proc = subprocess.run(
                 [sys.executable, "-I", "-S", str(path)],
-                capture_output=True, timeout=timeout, cwd=tmp,
-                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=timeout, cwd=tmp,
+                stdin=subprocess.DEVNULL, preexec_fn=preexec,
                 env={"PATH": "", "PYTHONIOENCODING": "utf-8",
                      "PYTHONDONTWRITEBYTECODE": "1"},
             )
@@ -637,6 +760,11 @@ def run_one(provider: dict, model: str, key: str, task: dict, args) -> dict:
         if status2 == 200:
             status, content, first_ms, total_ms, usage, error = \
                 status2, content2, first_ms2, total_ms2, usage2, error2
+
+    # 空响应不算成功：避免网关 200 空内容 + 回退失败时抬高 ok_runs
+    if status == 200 and not content:
+        status = None
+        error = "空响应（流式与非流式均无内容）"
 
     estimated = False
     if status == 200 and content and usage is None:
@@ -833,8 +961,11 @@ def cmd_run(args) -> str:
         sys.exit(2)
     tasks = _select_tasks(args, tasks_data)
     pairs = parse_pairs(args)
+    workers = int(getattr(args, "workers", 1) or 1)
+    if workers < 1:
+        workers = 1
 
-    rows = []
+    work = []
     for pid, model, key_override in pairs:
         provider = providers_data[pid]
         key = key_override or os.environ.get(provider.get("env_key") or "") or ""
@@ -842,29 +973,55 @@ def cmd_run(args) -> str:
             emit_err("提示：%s 未提供密钥（环境变量 %s 或 -p %s:sk-xxx），预计会 401。" % (
                 pid, provider.get("env_key"), pid))
         for task in tasks:
-            runs = [run_one(provider, model, key, task, args) for _ in range(repeat)]
-            row = summarize_runs(runs, provider, model, task["id"])
-            row["pid"] = pid
-            rows.append(row)
-            if args.verbose:
-                # 明细走 stderr：--json 时 stdout 必须是纯 JSON，否则无法解析
-                for r in runs:
-                    emit_err("[%s/%s %s] HTTP %s 首token %sms 总 %sms %s tok/s 通过 %s" % (
-                        pid, model, task["id"], r["status"], r["first_token_ms"],
-                        r["total_ms"], r.get("throughput_tps"), r["passed"]))
+            work.append((pid, provider, model, key, task))
+
+    def _execute(item):
+        pid, provider, model, key, task = item
+        if getattr(args, "cancel_event", None) and args.cancel_event.is_set():
+            raise BenchmarkCancelled("已取消")
+        runs = [run_one(provider, model, key, task, args) for _ in range(repeat)]
+        return pid, provider, model, task["id"], runs
+
+    if workers > 1 and len(work) > 1:
+        ordered = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(work))) as pool:
+            futures = [pool.submit(
+                lambda w=w: contextvars.copy_context().run(_execute, w)) for w in work]
+            for fut in concurrent.futures.as_completed(futures):
+                ordered.append(fut.result())
+        # 按提交顺序输出，保证报告稳定、便于对比
+        order = {(w[0], w[2], w[4]["id"]): i for i, w in enumerate(work)}
+        ordered.sort(key=lambda item: order[(item[0], item[2], item[3])])
+        executed = ordered
+    else:
+        executed = []
+        for item in work:
+            if getattr(args, "cancel_event", None) and args.cancel_event.is_set():
+                raise BenchmarkCancelled("已取消")
+            executed.append(_execute(item))
+
+    rows = []
+    for pid, provider, model, task_id, runs in executed:
+        row = summarize_runs(runs, provider, model, task_id)
+        row["pid"] = pid
+        rows.append(row)
+        if args.verbose:
+            for r in runs:
+                emit_err("[%s/%s %s] HTTP %s 首token %sms 总 %sms %s tok/s 通过 %s" % (
+                    pid, model, task_id, r["status"], r["first_token_ms"],
+                    r["total_ms"], r.get("throughput_tps"), r["passed"]))
 
     report = {"version": VERSION, "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-              "repeat": repeat, "rows": rows}
+              "repeat": repeat, "workers": workers, "rows": rows}
     if getattr(args, "save", None):
         save_path = Path(args.save)
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        save_path.write_text(json.dumps(report, ensure_ascii=False, indent=2),
-                             encoding="utf-8")
+        _atomic_write(save_path, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     md_path = getattr(args, "markdown", None)
     if md_path:
         md_file = Path(md_path)
         md_file.parent.mkdir(parents=True, exist_ok=True)
-        md_file.write_text(render_markdown(report), encoding="utf-8")
+        _atomic_write(md_file, render_markdown(report))
 
     if args.json:
         return json.dumps(report, ensure_ascii=False, indent=2)
@@ -978,10 +1135,10 @@ def cmd_refresh(args) -> str:
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             status = resp.status
-            raw = resp.read().decode("utf-8", "replace")
+            raw = _read_response_limited(resp).decode("utf-8", "replace")
     except urllib.error.HTTPError as err:
         status = err.code
-        raw = err.read().decode("utf-8", "replace")
+        raw = _read_response_limited(err).decode("utf-8", "replace")
     except Exception as err:
         return "刷新失败:无法连接 %s (%s)" % (url, err)
     ms = int((time.perf_counter() - started) * 1000)
@@ -1036,12 +1193,11 @@ def cmd_refresh(args) -> str:
         return "\n".join(lines)
 
     # 只把「网关来源」的供应商写进用户层，内置供应商（如 deepseek）保持内置数据不动
-    user_doc = {"schema_version": 1, "providers": {}}
-    if USER_DATA_FILE.exists():
-        try:
-            user_doc = json.loads(USER_DATA_FILE.read_text(encoding="utf-8"))
-        except ValueError:
-            user_doc = {"schema_version": 1, "providers": {}}
+    with USER_DATA_LOCK:
+        user_doc = load_user_doc()
+        user_doc.setdefault("providers", {})
+        user_doc["providers"][pid] = new_provider
+        path = write_user_providers(user_doc["providers"], price_updated=None)
     user_doc.setdefault("providers", {})
     user_doc["providers"][pid] = new_provider
     path = write_user_providers(user_doc["providers"], price_updated=None)
@@ -1136,6 +1292,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--timeout", type=int, default=120, help="单次请求超时秒数（默认 120）")
     p_run.add_argument("--retries", type=int, default=0,
                        help="429/5xx/网络错误的重试次数（默认 0，指数退避）")
+    p_run.add_argument("--workers", type=int, default=1,
+                       help="并发 worker 数（默认 1 串行，保证首 token 可比；>1 会打乱网络争用）")
     p_run.add_argument("--json", action="store_true", help="输出 JSON 报告")
     p_run.add_argument("--save", help="保存 JSON 报告到文件")
     p_run.add_argument("--markdown", "--md", dest="markdown",
@@ -1179,6 +1337,9 @@ def main(argv: list | None = None) -> int:
             from . import webui
             return webui.cmd_web(args)
         return 0
+    except DataFileError as exc:
+        emit_err("错误：%s" % exc)
+        return 2
     except KeyboardInterrupt:
         emit("\n已取消")
         return 130

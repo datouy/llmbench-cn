@@ -103,6 +103,44 @@ class TestChecks(unittest.TestCase):
                 "def fib(n):\n    os.system('echo pwned')\n    return n\n```")
         self.assertFalse(cli.check_py_fib(code))
 
+    def test_sandbox_blocks_dynamic_escape(self):
+        bad_cases = [
+            """def fib(n):
+    return __import__('os').system('id')
+""",
+            """def fib(n):
+    return eval('1')
+""",
+            """def fib(n):
+    return exec('1')
+""",
+            """def fib(n):
+    return open('/etc/passwd').read()
+""",
+            """def fib(n):
+    return (0).__class__.__mro__[1].__subclasses__()
+""",
+            """def fib(n):
+    return [].append(1)
+""",
+        ]
+        for bad in bad_cases:
+            self.assertFalse(cli._validate_code_ast(bad), repr(bad))
+        self.assertTrue(cli._validate_code_ast(
+            "fib = lambda n: n if n < 2 else fib(n-1) + fib(n-2)"))
+
+    def test_stream_total_deadline(self):
+        import time
+        lines = iter([b"x"])
+        with self.assertRaises(TimeoutError):
+            cli.parse_sse_lines(lines, time.perf_counter(),
+                                deadline=time.perf_counter() - 1)
+
+    def test_retry_wait_respects_retry_after(self):
+        self.assertEqual(cli._retry_wait_from({"Retry-After": "3"}, 1, 2.0), 3.0)
+        self.assertAlmostEqual(cli._retry_wait_from({"Retry-After": "x"}, 3, 2.0), 8.0)
+        self.assertEqual(cli._retry_wait_from({"Retry-After": "9999"}, 1, 2.0), 60.0)
+
     def test_json_keys(self):
         ok = '{"name": "张三", "city": "北京", "count": 5}'
         self.assertTrue(cli.check_json_keys(ok, {"name": "str", "city": "str", "count": "int"}))
@@ -280,6 +318,23 @@ class TestDataLayer(TempUserDataMixin, unittest.TestCase):
         cli.write_user_providers({"gateway": {"models": [{"id": "z"}]}})
         self.assertTrue((Path(str(cli.USER_DATA_FILE) + ".bak")).exists())
 
+    def test_write_user_providers_is_atomic_and_backup_survives(self):
+        first = {"gateway": {"base_url": "http://first/v1", "models": []}}
+        second = {"gateway": {"base_url": "http://second/v1", "models": []}}
+        cli.write_user_providers(first)
+        cli.write_user_providers(second)
+        self.assertIn("http://second/v1",
+                      cli.USER_DATA_FILE.read_text(encoding="utf-8"))
+        backup = Path(str(cli.USER_DATA_FILE) + ".bak")
+        self.assertIn("http://first/v1", backup.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(p.name for p in cli.USER_DATA_DIR.iterdir()),
+                         ["providers.json", "providers.json.bak"])
+
+    def test_corrupt_user_doc_raises_instead_of_silent_reset(self):
+        cli.USER_DATA_FILE.write_text("{broken", encoding="utf-8")
+        with self.assertRaises(cli.DataFileError):
+            cli.load_providers()
+
 
 class TestExtractModelIds(unittest.TestCase):
     def test_openai_format(self):
@@ -330,10 +385,122 @@ class TestWeb(unittest.TestCase):
                 self.assertIn("llmbench", r.read().decode("utf-8"))
             req = urllib.request.Request("http://127.0.0.1:%d/api/list" % port,
                                          data=b"{}", method="POST")
+            req.add_header("Origin", "http://127.0.0.1:%d" % port)
             with urllib.request.urlopen(req, timeout=5) as r:
                 data = json.loads(r.read().decode("utf-8"))
                 self.assertIn("providers", data["data"])
                 self.assertIn("tasks", data["data"])
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_web_rejects_missing_origin_and_oversized_body(self):
+        import threading
+        import urllib.error
+        import urllib.request
+        from llmbench import webui
+        srv = webui.ThreadingHTTPServer(("127.0.0.1", 0), webui.Handler)
+        port = srv.server_address[1]
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:%d/api/list" % port, data=b"{}", method="POST")
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(req, timeout=5)
+            self.assertEqual(ctx.exception.code, 403)
+
+            import socket
+            raw = (
+                "POST /api/run HTTP/1.1\r\n"
+                "Host: 127.0.0.1:%d\r\n"
+                "Origin: http://127.0.0.1:%d\r\n"
+                "Content-Type: application/json\r\n"
+                "Content-Length: %d\r\n"
+                "Connection: close\r\n\r\n" % (
+                    port, port, webui.MAX_BODY_BYTES + 1)
+            ).encode("ascii")
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+                s.sendall(raw)
+                buf = b""
+                while b"\r\n\r\n" not in buf:
+                    try:
+                        chunk = s.recv(1024)
+                    except ConnectionAbortedError:
+                        break
+                    if not chunk:
+                        break
+                    buf += chunk
+            self.assertIn(b" 413 ", buf)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_web_run_validates_bounds(self):
+        from llmbench import webui
+        cases = [
+            {"rows": []},
+            {"rows": [{"provider": "deepseek"}], "repeat": 0},
+            {"rows": [{"provider": "deepseek"}], "repeat": 11},
+            {"rows": [{"provider": "deepseek"}], "timeout": 4},
+            {"rows": [{"provider": "deepseek"}], "timeout": 301},
+            {"rows": [{"provider": "deepseek"}], "retries": -1},
+            {"rows": [{"provider": "deepseek"}], "retries": 6},
+        ]
+        for body in cases:
+            with self.assertRaises(ValueError, msg=repr(body)):
+                webui._validate_run_body(body)
+                webui._bounded_int(body.get("repeat", 1), 1, 1, 10, "重复次数")
+                webui._bounded_int(body.get("timeout", 120), 120, 5, 300, "超时秒数")
+                webui._bounded_int(body.get("retries", 0), 0, 0, 5, "重试次数")
+
+    def test_web_origin_requires_matching_host_and_port(self):
+        import threading
+        import urllib.error
+        import urllib.request
+        from llmbench import webui
+        srv = webui.ThreadingHTTPServer(("127.0.0.1", 0), webui.Handler)
+        port = srv.server_address[1]
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:%d/api/list" % port, data=b"{}", method="POST")
+            # 端口不匹配（DNS rebinding 的关键场景）必须拒绝
+            req.add_header("Origin", "http://127.0.0.1:1")
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(req, timeout=5)
+            self.assertEqual(ctx.exception.code, 403)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_web_run_async_status_and_cancel(self):
+        import threading
+        import urllib.request
+        from llmbench import webui
+        srv = webui.ThreadingHTTPServer(("127.0.0.1", 0), webui.Handler)
+        port = srv.server_address[1]
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        try:
+            body = json.dumps({"rows": [{"provider": "deepseek", "key": "sk-x"}],
+                               "tasks": ["code-fib"], "repeat": 1,
+                               "timeout": 30, "retries": 0,
+                               "base_url": "http://127.0.0.1:1/v1"}).encode("utf-8")
+            req = urllib.request.Request(
+                "http://127.0.0.1:%d/api/run_async" % port, data=body, method="POST")
+            req.add_header("Origin", "http://127.0.0.1:%d" % port)
+            with urllib.request.urlopen(req, timeout=5) as r:
+                started = json.loads(r.read().decode("utf-8"))
+            self.assertTrue(started["ok"])
+            task_id = started["task_id"]
+            req2 = urllib.request.Request(
+                "http://127.0.0.1:%d/api/tasks/%s" % (port, task_id))
+            req2.add_header("Origin", "http://127.0.0.1:%d" % port)
+            with urllib.request.urlopen(req2, timeout=5) as r:
+                status = json.loads(r.read().decode("utf-8"))
+            self.assertIn(status["status"], ("queued", "running", "done", "error"))
         finally:
             srv.shutdown()
             srv.server_close()

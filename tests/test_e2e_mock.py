@@ -35,6 +35,7 @@ class MockHandler(http.server.BaseHTTPRequestHandler):
     stream_reject = False
     no_usage = False
     flaky = 0
+    empty = False
 
     def log_message(self, *args):
         pass
@@ -89,6 +90,8 @@ class MockHandler(http.server.BaseHTTPRequestHandler):
             content = "14"
         else:
             content = "ok"
+        if MockHandler.empty:
+            content = ""
         usage = None if MockHandler.no_usage else {"prompt_tokens": 30, "completion_tokens": 25}
         if body.get("stream"):
             self._sse(content, usage)
@@ -125,6 +128,7 @@ class TestE2EMock(unittest.TestCase):
         MockHandler.stream_reject = False
         MockHandler.no_usage = False
         MockHandler.flaky = 0
+        MockHandler.empty = False
 
     def _restore(self):
         cli.USER_DATA_DIR = self._old_dir
@@ -188,6 +192,42 @@ class TestE2EMock(unittest.TestCase):
         report = json.loads(out)
         self.assertEqual(report["rows"][0]["passed"], "1/1")
         self.assertIn("重试", err)
+
+    def test_retry_backoff_not_counted_in_latency(self):
+        MockHandler.flaky = 1
+        base = "http://127.0.0.1:%d/v1" % self.port
+        rc, out, _ = self._run_cli(["run", "-p", "deepseek:sk-test", "-m", "deepseek-chat",
+                                    "--base-url", base, "-t", "math", "--retries", "1",
+                                    "--json"])
+        self.assertEqual(rc, 0, out)
+        report = json.loads(out)
+        row = report["rows"][0]
+        self.assertEqual(row["ok_runs"], 1)
+        # 退避 sleep 不应计入首 token/总时延；2s 退避若被计入会远超 1500ms
+        self.assertIsNotNone(row["first_ms"])
+        self.assertLess(row["first_ms"], 1500)
+
+    def test_empty_200_is_not_success(self):
+        MockHandler.empty = True
+        base = "http://127.0.0.1:%d/v1" % self.port
+        rc, out, _ = self._run_cli(["run", "-p", "deepseek:sk-test", "-m", "deepseek-chat",
+                                    "--base-url", base, "-t", "math", "--json"])
+        self.assertEqual(rc, 0, out)
+        report = json.loads(out)
+        row = report["rows"][0]
+        self.assertEqual(row["ok_runs"], 0)
+        self.assertIn("空响应", row["passed"])
+
+    def test_run_with_workers(self):
+        base = "http://127.0.0.1:%d/v1" % self.port
+        rc, out, _ = self._run_cli(["run", "-p", "deepseek:sk-test", "-m", "deepseek-chat",
+                                    "--base-url", base, "-t", "code-fib,math",
+                                    "--workers", "2", "--json"])
+        self.assertEqual(rc, 0, out)
+        report = json.loads(out)
+        self.assertEqual(report["workers"], 2)
+        self.assertEqual(len(report["rows"]), 2)
+        self.assertTrue(all(r["ok_runs"] == 1 for r in report["rows"]), out)
 
     def test_refresh_against_mock(self):
         base = "http://127.0.0.1:%d/v1" % self.port
