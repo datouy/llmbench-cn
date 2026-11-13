@@ -10,7 +10,9 @@ import argparse
 import json
 import os
 import threading
+import time
 import webbrowser
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import cli
@@ -157,41 +159,31 @@ init();
 
 
 def _run(fn, ns) -> dict:
-    """在线程中执行 cli 命令函数，捕获输出与 SystemExit。
+    """在当前请求线程执行 cli 命令函数，捕获输出与 SystemExit。
 
     用 cli.capture_output（基于 contextvars）而非 contextlib.redirect_stdout：
     后者改的是全局 sys.stdout，Web 面板并发请求时会互相串台。
     stdout 与 stderr 分开保存——JSON 报告只从 stdout 解析，
     否则「重试提示」之类的 stderr 内容会混进 JSON 导致解析失败。
-    """
+    不再额外包一层无法取消的 900 秒线程：外层 ThreadingHTTPServer 已经
+    按请求分线程，入口参数已做边界校验；避免超时后旧线程继续跑。"""
     box = {}
-
-    def worker():
+    with cli.capture_output() as cap:
         try:
-            with cli.capture_output() as cap:
-                try:
-                    box["out"] = fn(ns) or ""
-                except SystemExit as exc:
-                    box["exit"] = exc.code or 0
-                except Exception as exc:
-                    box["error"] = "%s: %s" % (type(exc).__name__, exc)
-                box["stdout"] = "\n".join(cap.out)
-                box["stderr"] = "\n".join(cap.err)
-        except Exception as exc:  # pragma: no cover - 兜底
+            box["out"] = fn(ns) or ""
+        except SystemExit as exc:
+            box["exit"] = exc.code or 0
+        except cli.BenchmarkCancelled:
+            raise
+        except Exception as exc:
             box["error"] = "%s: %s" % (type(exc).__name__, exc)
-
-    th = threading.Thread(target=worker, daemon=True)
-    th.start()
-    th.join(timeout=900)
-    if th.is_alive():
-        box["note"] = "任务仍在后台执行,超 900s 未返回。"
-    # cmd_* 返回值优先（它是命令的正式产物）；否则退回捕获到的 stdout
+        box["stdout"] = "\n".join(cap.out)
+        box["stderr"] = "\n".join(cap.err)
     stdout = box.get("out") or box.get("stdout", "")
-    stderr = box.get("stderr", "")
     return {"ok": box.get("error") is None and box.get("exit", 0) == 0,
             "exit": box.get("exit", 0), "error": box.get("error", ""),
-            "note": box.get("note", ""), "out": stdout.strip(),
-            "stderr": stderr.strip()}
+            "note": "", "out": stdout.strip(),
+            "stderr": box.get("stderr", "").strip()}
 
 
 def api_providers() -> dict:
@@ -213,21 +205,7 @@ def api_list(body: dict) -> dict:
 
 
 def api_run(body: dict) -> dict:
-    rows = [r for r in body.get("rows", []) if r.get("provider")]
-    if not rows:
-        return {"ok": False, "error": "请至少提供一个供应商"}
-    provider_tokens, models = [], []
-    for r in rows:
-        token = r["provider"] + (":" + str(r.get("key")) if r.get("key") else "")
-        provider_tokens.append(token)
-        models.append(r.get("model") or None)
-    tasks = body.get("tasks") or None
-    ns = argparse.Namespace(provider=provider_tokens, model=models,
-                            task=tasks, repeat=int(body.get("repeat") or 1),
-                            max_tokens=0, base_url=body.get("base_url") or None,
-                            timeout=int(body.get("timeout") or 120),
-                            retries=int(body.get("retries") or 0),
-                            json=True, save=None, markdown=None, verbose=False)
+    ns = _build_run_ns(body)
     res = _run(cli.cmd_run, ns)
     if res["ok"]:
         try:
@@ -236,6 +214,76 @@ def api_run(body: dict) -> dict:
         except Exception:
             pass
     return res
+
+
+def _build_run_ns(body: dict):
+    rows, tasks = _validate_run_body(body)
+    repeat = _bounded_int(body.get("repeat", 1), 1, 1, 10, "重复次数")
+    timeout = _bounded_int(body.get("timeout", 120), 120, 5, 300, "超时秒数")
+    retries = _bounded_int(body.get("retries", 0), 0, 0, 5, "重试次数")
+    provider_tokens, models = [], []
+    for r in rows:
+        token = r["provider"] + (":" + str(r.get("key")) if r.get("key") else "")
+        provider_tokens.append(token)
+        models.append(r.get("model") or None)
+    return argparse.Namespace(provider=provider_tokens, model=models,
+                              task=tasks or None, repeat=repeat,
+                              max_tokens=0, base_url=body.get("base_url") or None,
+                              timeout=timeout, retries=retries,
+                              json=True, save=None, markdown=None, verbose=False,
+                              workers=1)
+
+
+def api_run_async(body: dict):
+    ns = _build_run_ns(body)
+    ns.cancel_event = threading.Event()
+    global _JOB_COUNTER
+    with _JOBS_LOCK:
+        _JOB_COUNTER += 1
+        task_id = "job-%d" % _JOB_COUNTER
+        _JOBS[task_id] = {"status": "queued", "started_at": time.time(),
+                          "finished_at": None, "result": None, "error": None,
+                          "cancel_event": ns.cancel_event}
+
+    def worker():
+        with _JOBS_LOCK:
+            _JOBS[task_id]["status"] = "running"
+        try:
+            res = _run(cli.cmd_run, ns)
+            with _JOBS_LOCK:
+                _JOBS[task_id]["result"] = res
+                _JOBS[task_id]["status"] = "done"
+        except cli.BenchmarkCancelled:
+            with _JOBS_LOCK:
+                _JOBS[task_id]["status"] = "cancelled"
+        except Exception as exc:
+            with _JOBS_LOCK:
+                _JOBS[task_id]["status"] = "error"
+                _JOBS[task_id]["error"] = "%s: %s" % (type(exc).__name__, exc)
+        finally:
+            with _JOBS_LOCK:
+                _JOBS[task_id]["finished_at"] = time.time()
+
+    threading.Thread(target=worker, daemon=True).start()
+    return {"ok": True, "task_id": task_id, "status": "queued"}
+
+
+def api_task_status(task_id: str) -> dict:
+    with _JOBS_LOCK:
+        job = _JOBS.get(task_id)
+        if not job:
+            return {"ok": False, "error": "unknown task"}
+        return {"ok": True, "task_id": task_id, "status": job["status"],
+                "result": job["result"], "error": job["error"]}
+
+
+def api_task_cancel(task_id: str) -> dict:
+    with _JOBS_LOCK:
+        job = _JOBS.get(task_id)
+        if not job:
+            return {"ok": False, "error": "unknown task"}
+        job["cancel_event"].set()
+        return {"ok": True, "task_id": task_id, "status": "cancelling"}
 
 
 def api_refresh(body: dict) -> dict:
@@ -247,7 +295,47 @@ def api_refresh(body: dict) -> dict:
     return _run(cli.cmd_refresh, ns)
 
 
-API = {"run": api_run, "list": api_list, "refresh": api_refresh}
+API = {"run": api_run, "run_async": api_run_async, "list": api_list,
+       "refresh": api_refresh}
+MAX_BODY_BYTES = 1024 * 1024
+
+_JOBS = {}
+_JOBS_LOCK = threading.Lock()
+_JOB_COUNTER = 0
+
+
+def _bounded_int(value, default, low, high, field):
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("%s 必须是整数" % field)
+    if out < low or out > high:
+        raise ValueError("%s 必须在 %d 到 %d 之间" % (field, low, high))
+    return out
+
+
+def _validate_run_body(body):
+    rows = [r for r in body.get("rows", []) if isinstance(r, dict) and r.get("provider")]
+    if not rows:
+        raise ValueError("请至少提供一个供应商")
+    if len(rows) > 20:
+        raise ValueError("单次最多对比 20 个供应商")
+    for r in rows:
+        if not isinstance(r.get("provider"), str) or not r["provider"]:
+            raise ValueError("供应商 id 必须是非空字符串")
+        model = r.get("model")
+        if model is not None and not isinstance(model, str):
+            raise ValueError("模型名必须是字符串")
+        key = r.get("key")
+        if key is not None and not isinstance(key, str):
+            raise ValueError("API Key 必须是字符串")
+    tasks = body.get("tasks")
+    if tasks is not None:
+        if not isinstance(tasks, list) or not tasks or len(tasks) > 50:
+            raise ValueError("任务必须是非空数组，且最多 50 项")
+        if any(not isinstance(t, str) or not t for t in tasks):
+            raise ValueError("任务 id 必须是非空字符串")
+    return rows, tasks
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -269,16 +357,40 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _check_origin(self) -> bool:
-        """简单的同源校验：拒绝跨站 POST（面板本地使用，防 DNS rebinding 滥用）。"""
+        """校验 POST 的 Origin/Host 是否就是当前监听地址（防 DNS rebinding）。"""
         origin = self.headers.get("Origin")
         if not origin:
-            return True
-        host = self.headers.get("Host", "")
-        try:
-            o_host = origin.split("//", 1)[1].split("/", 1)[0]
-        except IndexError:
             return False
-        return o_host == host or o_host.split(":")[0] == host.split(":")[0]
+        host_raw = self.headers.get("Host", "")
+        try:
+            origin_url = urllib.parse.urlsplit(origin)
+            o_host = origin_url.hostname
+            o_port = origin_url.port
+            h_host, _, h_port = host_raw.rpartition(":")
+        except (ValueError, TypeError):
+            return False
+        if not origin_url.scheme or not o_host or not h_host:
+            return False
+        if origin_url.scheme.lower() != "http" or origin_url.username or origin_url.password:
+            return False
+        if not o_port or not h_port:
+            return False
+        return o_host.lower() == h_host.lower() and int(o_port) == int(h_port)
+
+    def _read_json_body(self) -> dict:
+        if self.headers.get("Transfer-Encoding"):
+            raise ValueError("不支持 Transfer-Encoding 请求")
+        try:
+            n = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            raise ValueError("缺少或非法的 Content-Length")
+        if n < 0 or n > MAX_BODY_BYTES:
+            raise OverflowError("请求体过大")
+        raw = self.rfile.read(n) or b"{}"
+        body = json.loads(raw)
+        if not isinstance(body, dict):
+            raise ValueError("请求体必须是 JSON 对象")
+        return body
 
     def do_GET(self):
         if self.path in ("/", "/index.html"):
@@ -289,6 +401,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/providers":
             self._send(200, api_providers())
             return
+        if self.path.startswith("/api/tasks/"):
+            task_id = self.path[len("/api/tasks/"):]
+            self._send(200, api_task_status(task_id))
+            return
         self._send(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
@@ -297,6 +413,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self._check_origin():
             self._send(403, {"ok": False, "error": "跨站请求被拒绝"})
+            return
+        if self.path.startswith("/api/tasks/") and self.path.endswith("/cancel"):
+            task_id = self.path[len("/api/tasks/"):-len("/cancel")]
+            self._send(200, api_task_cancel(task_id))
             return
         name = self.path[5:]
         if name == "providers":
@@ -307,13 +427,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"ok": False, "error": "unknown api: " + name})
             return
         try:
-            n = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(n) or b"{}")
+            body = self._read_json_body()
+        except OverflowError:
+            self._send(413, {"ok": False, "error": "请求体超过 1MB 上限"})
+            return
         except Exception:
             self._send(400, {"ok": False, "error": "bad json"})
             return
         try:
             self._send(200, fn(body))
+        except cli.DataFileError as exc:
+            self._send(503, {"ok": False, "error": str(exc)})
         except Exception as exc:
             self._send(500, {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)})
 
