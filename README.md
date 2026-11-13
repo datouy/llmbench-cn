@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-MIT-orange)](https://github.com/datouy/llmbench-cn/blob/main/LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/datouy/llmbench-cn/ci.yml?branch=main)](https://github.com/datouy/llmbench-cn/actions)
 ![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)
-![Version](https://img.shields.io/badge/version-0.2.0-brightgreen)
+![Version](https://img.shields.io/badge/version-0.3.0-brightgreen)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-success)
 [![Sister](https://img.shields.io/badge/sister_project-aicn-blueviolet)](https://github.com/datouy/aicn)
 
@@ -63,6 +63,9 @@ python -m llmbench refresh --base-url http://你的网关/v1 -k 网关Key   # �
 # 遇到 429 限流自动退避重试 / retry with backoff
 python -m llmbench run -p qwen -m qwen-plus --retries 2
 
+# 并发对比（默认串行以保证首 token 可比；--workers>1 会引入网络争用）
+python -m llmbench run -p qwen -m qwen-plus -t code-fib,math --workers 4
+
 # 导出报告 / export report
 python -m llmbench run -p qwen -m qwen-plus --json --save report.json
 python -m llmbench run -p qwen -m qwen-plus --markdown report.md      # Markdown 对比表
@@ -70,6 +73,11 @@ python -m llmbench run -p qwen -m qwen-plus --markdown report.md      # Markdown
 # 环境自检 / self-check
 python -m llmbench doctor
 ```
+
+稳定性与性能：写入用户数据采用「临时文件 + 原子替换」；Web 面板请求体上限 1MB、
+Host/Origin 精确校验；重试退避时间不计入时延指标，并遵循 `Retry-After`；流式响应
+带总超时与大小上限；`code-fib` 沙箱用 AST 白名单拦截动态 `import/eval/exec/open`，
+并在 POSIX 上限制 CPU/内存/输出文件大小。
 
 ## 📊 输出示例 · Sample Output
 
@@ -124,12 +132,15 @@ python -m llmbench web --port 9000
 
 面板与命令行复用同一套函数,行为完全一致;密钥只在浏览器与本进程内存之间传递,不落盘。姊妹项目 aicn 自带对应面板(默认 8787),两个面板页首可互跳。
 
+面板还提供异步任务接口:`POST /api/run_async` 返回 `task_id`,随后用
+`GET /api/tasks/<id>` 查询进度,`POST /api/tasks/<id>/cancel` 取消(取消粒度到下一个请求边界)。
+
 ## 🧰 命令一览 · Commands
 
 | 命令 / Command | 说明 / What it does |
 |---|---|
 | `llmbench list [--tasks] [--provider id] [--json]` | 查看供应商/模型/任务;`--provider` 展开单个供应商的全部模型与价格 / providers, models & tasks |
-| `llmbench run -p 供应商[:密钥] -m 模型 [-t 任务] [-n 次数] [--max-tokens N] [--base-url 网关] [--timeout S] [--retries N] [--json] [--save 文件] [--markdown 文件] [-v]` | 运行实测 / run benchmarks |
+| `llmbench run -p 供应商[:密钥] -m 模型 [-t 任务] [-n 次数] [--max-tokens N] [--base-url 网关] [--timeout S] [--retries N] [--workers W] [--json] [--save 文件] [--markdown 文件] [-v]` | 运行实测 / run benchmarks |
 | `llmbench refresh [-p gateway] [--base-url 网关] [-k 密钥] [--dry-run] [--no-prune]` | 从网关 `/models` 导入模型列表,写入用户数据层 / import gateway models |
 | `llmbench doctor` | 环境自检(Python 版本 / 数据文件 / 密钥是否配置)/ self-check |
 | `llmbench web [--port 8789] [--no-open]` | 本地 Web 面板 / local web panel |
@@ -138,7 +149,7 @@ python -m llmbench web --port 9000
 
 ## 🔒 安全说明 · Security
 
-- `code-fib` 会在**临时目录**中真实运行模型生成的代码(仅斐波那契断言 harness),运行前会**阻断 `os` / `shutil` / `subprocess` / `socket` 等危险 import**,子进程无 stdin、限时 30 秒、用完即删;
+- `code-fib` 会在**临时目录**中真实运行模型生成的代码(仅斐波那契断言 harness),运行前会**阻断 `os` / `shutil` / `subprocess` / `socket` 等危险 import**,并用 AST 白名单拦截 `__import__` / `eval` / `exec` / `open` / 属性调用等动态逃逸;子进程无 stdin、限时 30 秒、输出丢弃、用完即删,在 POSIX 上额外限制 CPU/内存/输出文件大小;
   > ⚠️ 这**不是**真正的安全沙箱——它依赖 Python 自身的 import 机制做限制,在同一台机器上仍有理论上的逃逸可能。只在可信环境(自己的机器、CI 容器)运行,不要在生产服务器上跑 `code-fib`。
   > Generated code runs in a temp dir with dangerous imports blocked; this is **not** a security sandbox — run it only on trusted machines.
 - 密钥只存在于命令行/环境变量/浏览器表单,不上传、不落盘,报告不含密钥;Keys never leave your machine;
@@ -156,7 +167,7 @@ python -m llmbench web --port 9000
 ## 🗺️ 路线图 · Roadmap
 
 - [ ] 更多客观任务:Bug 修复、代码审查、正则生成、长文摘要
-- [ ] 并发对比(多模型同时跑,缩短总耗时)
+- [x] 并发对比(`--workers`,默认 1 串行保证首 token 可比)
 - [ ] 本地历史趋势存储(SQLite)
 - [ ] 质量互评模式(模型 A 判模型 B 的输出)
 - [ ] 更严格的代码沙箱(容器 / seccomp)
